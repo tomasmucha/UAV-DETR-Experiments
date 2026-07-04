@@ -37,3 +37,62 @@ Main risk:
 
 - P3 is high resolution, so even small modules add some cost.
 - If the gate over-suppresses weak object features, recall may not improve.
+
+## Main Proposed Direction: Noise-Robust Small-Object Enhancement
+
+The stronger experiment family targets the current failure pattern more directly:
+
+- Small and dense objects are frequently missed as background.
+- Similar traffic categories are confused with each other.
+- UAV images include cluttered backgrounds, compression artifacts, blur, and low-quality regions.
+- The original UAV-DETR paper also states that robustness to noisy UAV inputs is a future direction.
+
+### Module 1: NRP3CBAM
+
+File: `ultralytics/nn/uav_modules/block.py`
+
+Config: `ultralytics/cfg/models/uavdetr-r18-nrp3.yaml`
+
+`NRP3CBAM` refines only the P3 high-resolution feature before the RT-DETR decoder. It combines:
+
+- Multi-scale depthwise convolution for local detail and wider context.
+- Existing frequency-style enhancement through `FFM`.
+- CBAM-style channel attention and spatial attention.
+- Residual scaling to reduce optimization risk.
+
+Expected effect:
+
+- Recover weak small-object cues before query decoding.
+- Reduce background distraction around dense targets.
+- Improve recall without completely changing the UAV-DETR neck.
+
+### Module 2: MSNoiseGate
+
+File: `ultralytics/nn/uav_modules/block.py`
+
+Config: `ultralytics/cfg/models/uavdetr-r18-noisegate.yaml`
+
+`MSNoiseGate` is applied separately to P3/P4/P5 before the decoder. It estimates local high-frequency residuals as a simple noise cue and uses a learnable gate to balance the original feature, a smoothed feature, and local structure.
+
+Expected effect:
+
+- Suppress noisy background responses before decoder query selection.
+- Improve feature stability across P3/P4/P5.
+- Support the paper-level theme of improving UAV-DETR robustness to noisy inputs.
+
+### Combined Model
+
+Config: `ultralytics/cfg/models/uavdetr-r18-nrp3-noisegate.yaml`
+
+This is the recommended first paid GPU experiment:
+
+- `NRP3CBAM` strengthens P3 for small objects.
+- `MSNoiseGate` filters P3/P4/P5 before the decoder.
+
+If the combined model improves over baseline, then run the two single-module configs for ablation:
+
+1. `uavdetr-r18-nrp3.yaml`
+2. `uavdetr-r18-noisegate.yaml`
+3. `uavdetr-r18-nrp3-noisegate.yaml`
+
+This saves training cost because the full combination is tested first.

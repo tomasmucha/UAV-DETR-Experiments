@@ -10,7 +10,10 @@ from collections import OrderedDict
 from ..modules.conv import Conv, DWConv, DSConv, RepConv, GhostConv, autopad, LightConv, ConvTranspose
 from ..modules.block import get_activation, ConvNormLayer, WTConvNormLayer,BasicBlock, BottleNeck, RepC3, C3, C2f, Bottleneck
 
-__all__ = ['DySample','SPDConv','MFFF','FrequencyFocusedDownSampling','SemanticAlignmenCalibration','P3Refine']
+__all__ = [
+    'DySample', 'SPDConv', 'MFFF', 'FrequencyFocusedDownSampling', 'SemanticAlignmenCalibration',
+    'P3Refine', 'NRP3CBAM', 'MSNoiseGate'
+]
 
 
 class DySample(nn.Module):
@@ -234,6 +237,63 @@ class P3Refine(nn.Module):
         y = self.local(y) + self.context(y)
         y = y * self.gate(y)
         return x + self.gamma * self.expand(y)
+
+
+class NRP3CBAM(nn.Module):
+    """Noise-robust P3 enhancement with multi-scale context and CBAM attention."""
+
+    def __init__(self, dim, e=0.5):
+        super().__init__()
+        hidden = int(dim * e)
+        mid = max(hidden // 4, 16)
+        self.reduce = Conv(dim, hidden, 1)
+        self.local = DWConv(hidden, hidden, 3)
+        self.context = DWConv(hidden, hidden, 5, d=2)
+        self.frequency = FFM(hidden)
+        self.channel_mlp = nn.Sequential(
+            nn.Conv2d(hidden, mid, 1, bias=False),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(mid, hidden, 1, bias=False),
+        )
+        self.spatial = nn.Conv2d(2, 1, kernel_size=7, padding=3, bias=False)
+        self.expand = Conv(hidden, dim, 1, act=False)
+        self.gamma = nn.Parameter(torch.tensor(0.1))
+
+    def forward(self, x):
+        y = self.reduce(x)
+        y = self.local(y) + self.context(y) + self.frequency(y)
+        avg_attn = self.channel_mlp(F.adaptive_avg_pool2d(y, 1))
+        max_attn = self.channel_mlp(F.adaptive_max_pool2d(y, 1))
+        y = y * torch.sigmoid(avg_attn + max_attn)
+        spatial_attn = torch.cat([torch.mean(y, dim=1, keepdim=True), torch.max(y, dim=1, keepdim=True)[0]], dim=1)
+        y = y * torch.sigmoid(self.spatial(spatial_attn))
+        return x + self.gamma * self.expand(y)
+
+
+class MSNoiseGate(nn.Module):
+    """Multi-scale noise gate applied per decoder feature level."""
+
+    def __init__(self, dim, e=0.25):
+        super().__init__()
+        hidden = max(int(dim * e), 16)
+        self.noise_gate = nn.Sequential(
+            Conv(dim, hidden, 1),
+            DWConv(hidden, hidden, 3),
+            Conv(hidden, dim, 1, act=False),
+            nn.Sigmoid(),
+        )
+        self.smooth = nn.Sequential(
+            DWConv(dim, dim, 3),
+            Conv(dim, dim, 1, act=False),
+        )
+        self.gamma = nn.Parameter(torch.tensor(0.1))
+
+    def forward(self, x):
+        low = F.avg_pool2d(x, kernel_size=3, stride=1, padding=1)
+        noise = torch.abs(x - low)
+        gate = self.noise_gate(noise)
+        refined = gate * self.smooth(x) + (1 - gate) * low
+        return x + self.gamma * (refined - x)
 
 class ADown(nn.Module): # Downsample x2分支
     def __init__(self, c1, c2):  

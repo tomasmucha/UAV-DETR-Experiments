@@ -803,7 +803,7 @@ def parse_model(d, ch, verbose=True, warehouse_manager=None):  # model_dict, inp
             if m is HGBlock:
                 args.insert(4, n)  # number of repeats
                 n = 1
-        elif m in {MFFF, P3Refine}:
+        elif m in {MFFF, P3Refine, NRP3CBAM, MSNoiseGate}:
             c2 = ch[f]
             args = [c2]
         elif m in { DySample
