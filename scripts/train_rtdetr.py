@@ -28,6 +28,9 @@ def parse_args():
     parser.add_argument("--patience", type=int, default=20)
     parser.add_argument("--cache", action="store_true")
     parser.add_argument("--resume", default=None, help="Optional last.pt path to resume from.")
+    parser.add_argument("--fraction", type=float, default=1.0, help="Dataset fraction to use for quick tests.")
+    parser.add_argument("--no-val", action="store_true", help="Skip validation during quick smoke tests.")
+    parser.add_argument("--exist-ok", action="store_true", help="Reuse an existing run directory.")
     parser.add_argument("--optimizer", default="AdamW")
     parser.add_argument("--lr0", type=float, default=0.0001)
     parser.add_argument("--momentum", type=float, default=0.9)
@@ -52,6 +55,7 @@ def main():
     model = RTDETR(args.model)
     train_kwargs = vars(args).copy()
     train_kwargs.pop("model")
+    train_kwargs["val"] = not train_kwargs.pop("no_val")
     if train_kwargs["resume"] is None:
         train_kwargs.pop("resume")
     model.train(**train_kwargs)

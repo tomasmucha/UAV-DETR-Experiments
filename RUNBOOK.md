@@ -84,6 +84,19 @@ If the combined model improves over baseline, run these two ablations:
 /root/miniconda3/bin/python -m compileall -q ultralytics scripts train.py val.py
 /root/miniconda3/bin/python scripts/smoke_model.py --model ultralytics/cfg/models/uavdetr-r18.yaml --imgsz 640 --device 0
 /root/miniconda3/bin/python scripts/smoke_model.py --model ultralytics/cfg/models/uavdetr-r18-nrp3-noisegate.yaml --imgsz 640 --device 0
+/root/miniconda3/bin/python scripts/train_rtdetr.py \
+  --model ultralytics/cfg/models/uavdetr-r18-nrp3-noisegate.yaml \
+  --data /root/autodl-tmp/datasets/VisDrone/visdrone.yaml \
+  --imgsz 640 \
+  --epochs 1 \
+  --batch 2 \
+  --workers 0 \
+  --device 0 \
+  --project runs/train \
+  --name smoke_r18_nrp3_noisegate_fast \
+  --fraction 0.02 \
+  --no-val \
+  --exist-ok
 ```
 
 ## Validation
