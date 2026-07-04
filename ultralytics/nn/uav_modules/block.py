@@ -211,16 +211,29 @@ class MFFF(nn.Module):
 
 
 class P3Refine(nn.Module):
-    """Lightweight residual refinement for the high-resolution P3 feature branch."""
+    """P3 experiment: lightweight multi-scale refinement for small-object features."""
 
-    def __init__(self, dim):
+    def __init__(self, dim, e=0.5):
         super().__init__()
-        self.spatial = DWConv(dim, dim, 3)
-        self.channel = Conv(dim, dim, 1, act=False)
-        self.gamma = nn.Parameter(torch.zeros(1))
+        hidden = int(dim * e)
+        self.reduce = Conv(dim, hidden, 1)
+        self.local = DWConv(hidden, hidden, 3)
+        self.context = DWConv(hidden, hidden, 5, d=2)
+        self.gate = nn.Sequential(
+            nn.AdaptiveAvgPool2d(1),
+            nn.Conv2d(hidden, max(hidden // 4, 16), 1),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(max(hidden // 4, 16), hidden, 1),
+            nn.Sigmoid(),
+        )
+        self.expand = Conv(hidden, dim, 1, act=False)
+        self.gamma = nn.Parameter(torch.tensor(0.1))
 
     def forward(self, x):
-        return x + self.gamma * self.channel(self.spatial(x))
+        y = self.reduce(x)
+        y = self.local(y) + self.context(y)
+        y = y * self.gate(y)
+        return x + self.gamma * self.expand(y)
 
 class ADown(nn.Module): # Downsample x2分支
     def __init__(self, c1, c2):  
