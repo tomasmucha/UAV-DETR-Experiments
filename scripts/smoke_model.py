@@ -23,12 +23,20 @@ def parse_args():
     return parser.parse_args()
 
 
+def resolve_device(device_arg):
+    if device_arg == "cpu":
+        return torch.device("cpu")
+    if torch.cuda.is_available():
+        return torch.device(f"cuda:{device_arg}" if device_arg.isdigit() else device_arg)
+    return torch.device("cpu")
+
+
 def main():
     args = parse_args()
     if not Path(args.model).exists():
         raise FileNotFoundError(f"model yaml does not exist: {args.model}")
 
-    device = torch.device(args.device if args.device == "cpu" or torch.cuda.is_available() else "cpu")
+    device = resolve_device(args.device)
     model = RTDETR(args.model).model.to(device).eval()
     x = torch.zeros(args.batch, 3, args.imgsz, args.imgsz, device=device)
     with torch.no_grad():
