@@ -68,6 +68,7 @@ class RTDETRTrainer(DetectionTrainer):
                              rect=False,
                              cache=self.args.cache or None,
                              prefix=colorstr(f'{mode}: '),
+                             fraction=self.args.fraction if mode == 'train' else 1.0,
                              data=self.data)
 
     def get_validator(self):

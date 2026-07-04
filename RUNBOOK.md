@@ -90,12 +90,10 @@ If the combined model improves over baseline, run these two ablations:
   --imgsz 640 \
   --epochs 1 \
   --batch 4 \
-  --workers 0 \
+  --workers 8 \
   --device 0 \
   --project runs/train \
   --name smoke_r18_nrp3_noisegate_fast \
-  --fraction 0.02 \
-  --no-val \
   --exist-ok
 ```
 
