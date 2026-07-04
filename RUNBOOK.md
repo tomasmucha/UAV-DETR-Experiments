@@ -89,7 +89,7 @@ If the combined model improves over baseline, run these two ablations:
   --data /root/autodl-tmp/datasets/VisDrone/visdrone.yaml \
   --imgsz 640 \
   --epochs 1 \
-  --batch 2 \
+  --batch 4 \
   --workers 0 \
   --device 0 \
   --project runs/train \
