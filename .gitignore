@@ -4,6 +4,9 @@
 *.pyd
 __pycache__/
 runs/
+results_archive/
+.tmp_compare/
+.tmp_results/
 *.pt
 *.pth
 *.onnx

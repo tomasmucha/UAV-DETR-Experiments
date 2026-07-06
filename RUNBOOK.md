@@ -36,12 +36,12 @@ cd /root/autodl-tmp/UAV-DETR-Experiments
 
 ## Recommended Strong Experiment on AutoDL
 
-Run this first after smoke testing. It combines P3 small-object enhancement and multi-scale noise gating.
+Run this after smoke testing. It uses high-resolution P2 detail to guide the final P3 feature before the RT-DETR decoder.
 
 ```bash
 cd /root/autodl-tmp/UAV-DETR-Experiments
 /root/miniconda3/bin/python scripts/train_rtdetr.py \
-  --model ultralytics/cfg/models/uavdetr-r18-nrp3-noisegate.yaml \
+  --model ultralytics/cfg/models/uavdetr-r18-p2p3.yaml \
   --data /root/autodl-tmp/datasets/VisDrone/visdrone.yaml \
   --imgsz 640 \
   --epochs 400 \
@@ -49,10 +49,10 @@ cd /root/autodl-tmp/UAV-DETR-Experiments
   --workers 8 \
   --device 0 \
   --project runs/train \
-  --name uavdetr_r18_nrp3_noisegate_visdrone640
+  --name uavdetr_r18_p2p3_visdrone640
 ```
 
-If the combined model improves over baseline, run these two ablations:
+Previous ablations kept for comparison:
 
 ```bash
 /root/miniconda3/bin/python scripts/train_rtdetr.py \
@@ -83,9 +83,9 @@ If the combined model improves over baseline, run these two ablations:
 ```bash
 /root/miniconda3/bin/python -m compileall -q ultralytics scripts train.py val.py
 /root/miniconda3/bin/python scripts/smoke_model.py --model ultralytics/cfg/models/uavdetr-r18.yaml --imgsz 640 --device 0
-/root/miniconda3/bin/python scripts/smoke_model.py --model ultralytics/cfg/models/uavdetr-r18-nrp3-noisegate.yaml --imgsz 640 --device 0
+/root/miniconda3/bin/python scripts/smoke_model.py --model ultralytics/cfg/models/uavdetr-r18-p2p3.yaml --imgsz 640 --device 0
 /root/miniconda3/bin/python scripts/train_rtdetr.py \
-  --model ultralytics/cfg/models/uavdetr-r18-nrp3-noisegate.yaml \
+  --model ultralytics/cfg/models/uavdetr-r18-p2p3.yaml \
   --data /root/autodl-tmp/datasets/VisDrone/visdrone.yaml \
   --imgsz 640 \
   --epochs 1 \
@@ -93,7 +93,7 @@ If the combined model improves over baseline, run these two ablations:
   --workers 8 \
   --device 0 \
   --project runs/train \
-  --name smoke_r18_nrp3_noisegate_fast \
+  --name smoke_r18_p2p3_fast \
   --exist-ok
 ```
 

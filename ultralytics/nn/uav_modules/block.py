@@ -12,7 +12,7 @@ from ..modules.block import get_activation, ConvNormLayer, WTConvNormLayer,Basic
 
 __all__ = [
     'DySample', 'SPDConv', 'MFFF', 'FrequencyFocusedDownSampling', 'SemanticAlignmenCalibration',
-    'P3Refine', 'NRP3CBAM', 'MSNoiseGate'
+    'P3Refine', 'NRP3CBAM', 'MSNoiseGate', 'P2GuidedP3Enhance'
 ]
 
 
@@ -268,6 +268,57 @@ class NRP3CBAM(nn.Module):
         spatial_attn = torch.cat([torch.mean(y, dim=1, keepdim=True), torch.max(y, dim=1, keepdim=True)[0]], dim=1)
         y = y * torch.sigmoid(self.spatial(spatial_attn))
         return x + self.gamma * self.expand(y)
+
+
+class P2GuidedP3Enhance(nn.Module):
+    """P2-guided P3 enhancement for small, dense UAV targets.
+
+    The module keeps the decoder inputs unchanged while injecting high-resolution P2 detail into the final P3 feature.
+    P2 is folded to P3 resolution with a Focus-style operation, fused with semantic P3 by channel/spatial gates, and
+    applied as a residual update so the original UAV-DETR feature path remains recoverable during training.
+    """
+
+    def __init__(self, c_p2, c_p3, e=0.5):
+        super().__init__()
+        hidden = max(int(c_p3 * e), 64)
+        self.p2_proj = Conv(c_p2 * 4, hidden, 1)
+        self.p2_detail = nn.Sequential(
+            DWConv(hidden, hidden, 3),
+            DWConv(hidden, hidden, 5, d=2),
+        )
+        self.p3_proj = Conv(c_p3, hidden, 1)
+        self.fuse = nn.Sequential(
+            Conv(hidden * 2, hidden, 1),
+            DWConv(hidden, hidden, 3),
+            Conv(hidden, c_p3, 1, act=False),
+        )
+        self.channel_gate = nn.Sequential(
+            Conv(hidden * 2, hidden, 1),
+            nn.Conv2d(hidden, c_p3, 1, bias=True),
+            nn.Sigmoid(),
+        )
+        self.spatial_gate = nn.Sequential(
+            nn.Conv2d(2, 1, kernel_size=7, padding=3, bias=False),
+            nn.Sigmoid(),
+        )
+        self.gamma = nn.Parameter(torch.tensor(0.2))
+
+    @staticmethod
+    def _focus(x):
+        return torch.cat((x[..., ::2, ::2], x[..., 1::2, ::2], x[..., ::2, 1::2], x[..., 1::2, 1::2]), 1)
+
+    def forward(self, x):
+        p2, p3 = x
+        p2 = self.p2_proj(self._focus(p2))
+        if p2.shape[2:] != p3.shape[2:]:
+            p2 = F.interpolate(p2, size=p3.shape[2:], mode='bilinear', align_corners=False)
+        p2 = self.p2_detail(p2)
+        p3_sem = self.p3_proj(p3)
+        fused = torch.cat([p2, p3_sem], dim=1)
+        delta = self.fuse(fused)
+        channel = self.channel_gate(fused)
+        spatial = self.spatial_gate(torch.cat([delta.mean(1, keepdim=True), delta.max(1, keepdim=True)[0]], dim=1))
+        return p3 + self.gamma * channel * spatial * delta
 
 
 class MSNoiseGate(nn.Module):
