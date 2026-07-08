@@ -5,6 +5,7 @@
 __pycache__/
 runs/
 results_archive/
+datasets/
 .tmp_compare/
 .tmp_results/
 *.pt

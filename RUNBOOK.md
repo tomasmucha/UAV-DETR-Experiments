@@ -2,59 +2,64 @@
 
 This repository keeps code and configs only. Do not commit datasets, checkpoints, or `runs/` outputs.
 
-## Baseline Training on AutoDL
+## Local Layout
+
+Repository root:
+
+```text
+D:\Projects\UAV-DETR-main
+```
+
+Local dataset:
+
+```text
+D:\Projects\UAV-DETR-main\datasets\VisDrone2019-DET
+```
+
+Local experiment archive:
+
+```text
+D:\Projects\UAV-DETR-main\results_archive
+```
+
+Failed or low-priority experiments:
+
+```text
+D:\Projects\UAV-DETR-main\results_archive\graveyard
+```
+
+## Current Baselines
+
+Best known baseline:
+
+```text
+run: uavdetr_r18_baseline_visdrone640
+config: ultralytics/cfg/models/uavdetr-r18.yaml
+best epoch: 258
+AP50: 0.52308
+AP50-95: 0.32524
+P: 0.64197
+R: 0.50290
+```
+
+Best known improved run:
+
+```text
+run: uavdetr_r18_nrp3_visdrone640
+config: ultralytics/cfg/models/uavdetr-r18-nrp3.yaml
+best epoch: 271
+AP50: 0.52638
+AP50-95: 0.32886
+P: 0.63733
+R: 0.50875
+```
+
+Treat `uavdetr-r18-nrp3.yaml` as the current best ablation, not as a final thesis contribution. The gain is real but small.
+
+## AutoDL Training Template
 
 ```bash
 cd /root/autodl-tmp/UAV-DETR-Experiments
-/root/miniconda3/bin/python scripts/train_rtdetr.py \
-  --model ultralytics/cfg/models/uavdetr-r18.yaml \
-  --data /root/autodl-tmp/datasets/VisDrone/visdrone.yaml \
-  --imgsz 640 \
-  --epochs 400 \
-  --batch 4 \
-  --workers 8 \
-  --device 0 \
-  --project runs/train \
-  --name uavdetr_r18_baseline_visdrone640
-```
-
-## P3 Experiment Training on AutoDL
-
-```bash
-cd /root/autodl-tmp/UAV-DETR-Experiments
-/root/miniconda3/bin/python scripts/train_rtdetr.py \
-  --model ultralytics/cfg/models/uavdetr-r18-p3.yaml \
-  --data /root/autodl-tmp/datasets/VisDrone/visdrone.yaml \
-  --imgsz 640 \
-  --epochs 400 \
-  --batch 4 \
-  --workers 8 \
-  --device 0 \
-  --project runs/train \
-  --name uavdetr_r18_p3_visdrone640
-```
-
-## Recommended Strong Experiment on AutoDL
-
-Run this after smoke testing. It uses high-resolution P2 detail to guide the final P3 feature before the RT-DETR decoder.
-
-```bash
-cd /root/autodl-tmp/UAV-DETR-Experiments
-/root/miniconda3/bin/python scripts/train_rtdetr.py \
-  --model ultralytics/cfg/models/uavdetr-r18-p2p3.yaml \
-  --data /root/autodl-tmp/datasets/VisDrone/visdrone.yaml \
-  --imgsz 640 \
-  --epochs 400 \
-  --batch 4 \
-  --workers 8 \
-  --device 0 \
-  --project runs/train \
-  --name uavdetr_r18_p2p3_visdrone640
-```
-
-Previous ablations kept for comparison:
-
-```bash
 /root/miniconda3/bin/python scripts/train_rtdetr.py \
   --model ultralytics/cfg/models/uavdetr-r18-nrp3.yaml \
   --data /root/autodl-tmp/datasets/VisDrone/visdrone.yaml \
@@ -65,47 +70,85 @@ Previous ablations kept for comparison:
   --device 0 \
   --project runs/train \
   --name uavdetr_r18_nrp3_visdrone640
-
-/root/miniconda3/bin/python scripts/train_rtdetr.py \
-  --model ultralytics/cfg/models/uavdetr-r18-noisegate.yaml \
-  --data /root/autodl-tmp/datasets/VisDrone/visdrone.yaml \
-  --imgsz 640 \
-  --epochs 400 \
-  --batch 4 \
-  --workers 8 \
-  --device 0 \
-  --project runs/train \
-  --name uavdetr_r18_noisegate_visdrone640
 ```
+
+Use a distinct `--name` for every experiment. Never hardcode dataset paths into model code.
 
 ## Smoke Test
 
 ```bash
+cd /root/autodl-tmp/UAV-DETR-Experiments
 /root/miniconda3/bin/python -m compileall -q ultralytics scripts train.py val.py
-/root/miniconda3/bin/python scripts/smoke_model.py --model ultralytics/cfg/models/uavdetr-r18.yaml --imgsz 640 --device 0
-/root/miniconda3/bin/python scripts/smoke_model.py --model ultralytics/cfg/models/uavdetr-r18-p2p3.yaml --imgsz 640 --device 0
-/root/miniconda3/bin/python scripts/train_rtdetr.py \
-  --model ultralytics/cfg/models/uavdetr-r18-p2p3.yaml \
-  --data /root/autodl-tmp/datasets/VisDrone/visdrone.yaml \
+/root/miniconda3/bin/python scripts/smoke_model.py \
+  --model ultralytics/cfg/models/uavdetr-r18-nrp3.yaml \
   --imgsz 640 \
-  --epochs 1 \
-  --batch 4 \
-  --workers 8 \
-  --device 0 \
-  --project runs/train \
-  --name smoke_r18_p2p3_fast \
-  --exist-ok
+  --device 0
+```
+
+## tmux Training
+
+```bash
+tmux new -d -s uavdetr_exp 'bash logs/run_full_train.sh'
+tmux attach -t uavdetr_exp
+```
+
+Detach without stopping:
+
+```text
+Ctrl+B, then D
+```
+
+Stop only after deciding the run should end:
+
+```bash
+tmux send-keys -t uavdetr_exp C-c
 ```
 
 ## Validation
 
+If a run is interrupted manually, run validation from `best.pt` to generate PR curves, F1 curves, confusion matrices, and prediction images.
+
 ```bash
+cd /root/autodl-tmp/UAV-DETR-Experiments
 /root/miniconda3/bin/python scripts/val_rtdetr.py \
-  --model runs/train/uavdetr_r18_p3_visdrone640/weights/best.pt \
+  --model runs/train/<run_name>/weights/best.pt \
   --data /root/autodl-tmp/datasets/VisDrone/visdrone.yaml \
   --imgsz 640 \
   --batch 4 \
   --device 0 \
   --project runs/val \
-  --name uavdetr_r18_p3_visdrone640
+  --name <run_name>_best \
+  --save-json
+```
+
+## Early Stop Rule
+
+Compare every new run against baseline and A v1 at the same epoch. Do not judge only by the final best.
+
+Useful checkpoint epochs:
+
+```text
+20, 30, 50, 75, 100, 135, 160, 180, 200, 250
+```
+
+Stop early when:
+
+- the run is below baseline and A v1 for many checkpoints,
+- recall, precision, AP50, and AP50-95 show no compensating advantage,
+- best AP has not refreshed for about 10 epochs after epoch 200,
+- or the run matches a known failed direction in `EXPERIMENT_NOTES.md`.
+
+## Low-Priority Directions
+
+Do not prioritize these unless they are needed for an ablation table:
+
+```text
+MSNoiseGate / noisegate
+NRP3 + noisegate
+P2-guided P3 direct injection
+hard SBQ / scale-balanced query selection
+Soft-SBQ
+NRP3 + Soft-SBQ
+decoder-input cross-scale adapter
+ContextRepC3 / NeckCtx
 ```

@@ -1,98 +1,243 @@
-# Experiment Notes
+# UAV-DETR Experiment Notes
 
-## Baseline: UAV-DETR-R18
+## Current Context
 
-The reproduced baseline uses `ultralytics/cfg/models/uavdetr-r18.yaml` on VisDrone at `imgsz=640`.
+The project studies UAV-DETR-R18 on VisDrone2019-DET for small, dense, and occluded object detection. The main baseline issue is missed detections: many true objects are classified as background. This is especially visible for small or ambiguous classes such as pedestrian, person, car, motorbike, bicycle, and tricycle.
 
-Observed validation behavior from `runs/train/uavdetr_r18_visdrone_640`:
+The original paper mentions noise robustness as future work, but the experiments so far show that simply smoothing or gating noisy details can hurt small-object detection.
 
-- Best mAP50-95 appears around epoch 258: mAP50 about 0.523, mAP50-95 about 0.325.
-- Recall plateaus around 0.50, while precision is higher at about 0.64.
-- The normalized confusion matrix shows a clear background column/row issue: many true objects are missed as background.
-- The miss pattern is strongest for small or visually ambiguous classes such as car, pedestrian/person, motorbike, bicycle, and tricycle.
-- There is also inter-class confusion among visually similar vehicle classes, especially bus/van/truck and motorbike/bicycle.
+## Confirmed Reference Results
 
-## First Ablation: P3Refine
+Baseline:
 
-File: `ultralytics/cfg/models/uavdetr-r18-p3.yaml`
+```text
+config: ultralytics/cfg/models/uavdetr-r18.yaml
+run: uavdetr_r18_baseline_visdrone640
+best epoch: 258
+P: 0.64197
+R: 0.50290
+AP50: 0.52308
+AP50-95: 0.32524
+```
 
-The baseline already feeds P3/P4/P5 into `RTDETRDecoder`. Therefore this ablation does not add a new detection scale. It keeps the architecture change localized by refining only the P3 feature immediately before the decoder.
+Current best ablation, A v1:
 
-The module `P3Refine` is intentionally small:
+```text
+config: ultralytics/cfg/models/uavdetr-r18-nrp3.yaml
+run: uavdetr_r18_nrp3_visdrone640
+best epoch: 271
+P: 0.63733
+R: 0.50875
+AP50: 0.52638
+AP50-95: 0.32886
+```
 
-- 1x1 channel reduction.
-- Depthwise 3x3 local detail branch.
-- Dilated depthwise 5x5 context branch.
-- Lightweight channel gate.
-- 1x1 projection back to the original P3 channel size.
-- Residual output with a learnable scale.
+A v1 is the best known result so far. It improves recall and AP slightly, but the gain is too small to be the final thesis contribution by itself.
 
-Expected effect:
+## What Has Worked
 
-- Improve small-object detail before query decoding.
-- Add limited context to suppress noisy background responses.
-- Keep parameter and FLOP growth small enough for the UAV/edge deployment motivation.
+### A v1: NRP3CBAM
 
-Main risk:
+File:
 
-- P3 is high resolution, so even small modules add some cost.
-- If the gate over-suppresses weak object features, recall may not improve.
+```text
+ultralytics/cfg/models/uavdetr-r18-nrp3.yaml
+```
 
-## Main Proposed Direction: Noise-Robust Small-Object Enhancement
+Idea:
 
-The stronger experiment family targets the current failure pattern more directly:
+- refine final P3 before the decoder,
+- use multi-scale depthwise context,
+- use frequency-style enhancement through existing `FFM`,
+- use CBAM-style channel and spatial attention,
+- keep residual scaling to reduce optimization risk.
 
-- Small and dense objects are frequently missed as background.
-- Similar traffic categories are confused with each other.
-- UAV images include cluttered backgrounds, compression artifacts, blur, and low-quality regions.
-- The original UAV-DETR paper also states that robustness to noisy UAV inputs is a future direction.
+Result:
 
-### Module 1: NRP3CBAM
+```text
+AP50: +0.00330 over baseline
+AP50-95: +0.00362 over baseline
+Recall: +0.00585 over baseline
+Precision: -0.00464 below baseline
+```
 
-File: `ultralytics/nn/uav_modules/block.py`
+Interpretation:
 
-Config: `ultralytics/cfg/models/uavdetr-r18-nrp3.yaml`
+- The high-resolution P3 direction is reasonable.
+- The effect is too weak, so future work needs a stronger but more selective module.
 
-`NRP3CBAM` refines only the P3 high-resolution feature before the RT-DETR decoder. It combines:
+## Failed Or Low-Priority Directions
 
-- Multi-scale depthwise convolution for local detail and wider context.
-- Existing frequency-style enhancement through `FFM`.
-- CBAM-style channel attention and spatial attention.
-- Residual scaling to reduce optimization risk.
+### MSNoiseGate
 
-Expected effect:
+Config:
 
-- Recover weak small-object cues before query decoding.
-- Reduce background distraction around dense targets.
-- Improve recall without completely changing the UAV-DETR neck.
+```text
+ultralytics/cfg/models/uavdetr-r18-noisegate.yaml
+```
 
-### Module 2: MSNoiseGate
+Best result:
 
-File: `ultralytics/nn/uav_modules/block.py`
+```text
+best epoch: 243
+P: 0.63099
+R: 0.49657
+AP50: 0.51047
+AP50-95: 0.31056
+```
 
-Config: `ultralytics/cfg/models/uavdetr-r18-noisegate.yaml`
+Why it failed:
 
-`MSNoiseGate` is applied separately to P3/P4/P5 before the decoder. It estimates local high-frequency residuals as a simple noise cue and uses a learnable gate to balance the original feature, a smoothed feature, and local structure.
+- It likely suppresses high-frequency small-object details together with noise.
+- Recall and AP both dropped.
+- Noise robustness cannot be implemented as generic smoothing for this task.
 
-Expected effect:
+### NRP3 + NoiseGate
 
-- Suppress noisy background responses before decoder query selection.
-- Improve feature stability across P3/P4/P5.
-- Support the paper-level theme of improving UAV-DETR robustness to noisy inputs.
+Config:
 
-### Combined Model
+```text
+ultralytics/cfg/models/uavdetr-r18-nrp3-noisegate.yaml
+```
 
-Config: `ultralytics/cfg/models/uavdetr-r18-nrp3-noisegate.yaml`
+Best result:
 
-This is the recommended first paid GPU experiment:
+```text
+best epoch: 169
+P: 0.63258
+R: 0.48842
+AP50: 0.50599
+AP50-95: 0.31367
+```
 
-- `NRP3CBAM` strengthens P3 for small objects.
-- `MSNoiseGate` filters P3/P4/P5 before the decoder.
+Why it failed:
 
-If the combined model improves over baseline, then run the two single-module configs for ablation:
+- NRP3 tries to recover fine detail, while NoiseGate suppresses high-frequency responses.
+- The two modules interact negatively.
+- This confirms that recall-oriented P3 enhancement and noise smoothing should not be naively combined.
 
-1. `uavdetr-r18-nrp3.yaml`
-2. `uavdetr-r18-noisegate.yaml`
-3. `uavdetr-r18-nrp3-noisegate.yaml`
+### A v2: P2-Guided P3
 
-This saves training cost because the full combination is tested first.
+Config:
+
+```text
+ultralytics/cfg/models/uavdetr-r18-p2p3.yaml
+```
+
+Best result:
+
+```text
+best epoch: 250
+P: 0.63279
+R: 0.50824
+AP50: 0.52093
+AP50-95: 0.32316
+```
+
+Why it failed:
+
+- Directly injecting P2 detail into P3 increased recall slightly but reduced precision and AP.
+- P2 contains useful small-object detail, but also more background texture and noise.
+- The module was more aggressive than A v1, but not selective enough.
+
+### Hard SBQ / Scale-Balanced Query Selection
+
+Run:
+
+```text
+uavdetr_r18_sbq_visdrone640
+```
+
+Observed result:
+
+```text
+best around epoch 85
+P: 0.59783
+R: 0.44824
+AP50: 0.46598
+AP50-95: 0.28916
+```
+
+Why it failed:
+
+- Reserving more P3 queries does not improve the quality of P3 features.
+- If P3 candidates are weak, quota allocation only preserves more weak candidates.
+- The bottleneck is feature quality and class-background separability, not only query count.
+
+### NRP3 + Soft-SBQ
+
+Run:
+
+```text
+uavdetr_r18_nrp3_softsbq_visdrone640
+```
+
+Observed result:
+
+```text
+stopped at epoch 21
+P: 0.45547
+R: 0.31894
+AP50: 0.32087
+AP50-95: 0.18866
+```
+
+Why it failed:
+
+- Soft query reservation did not cooperate with NRP3.
+- It likely disrupted the decoder's original confidence ranking.
+- Query allocation is not the current priority.
+
+### Decoder-Input Cross-Scale Adapter
+
+Why it is not preferred:
+
+- It behaves like an adapter immediately before decoder input.
+- The user wants clearer backbone or neck changes, not a change that is hard to attribute.
+- Do not package this as a neck or backbone contribution.
+
+### NeckCtx / ContextRepC3
+
+Run:
+
+```text
+uavdetr_r18_neckctx_visdrone640
+```
+
+Observed result:
+
+```text
+stopped at epoch 32
+P: 0.50030
+R: 0.36125
+AP50: 0.37232
+AP50-95: 0.22208
+```
+
+Why it failed:
+
+- Lightweight context inside the neck only chased baseline and did not exceed A v1.
+- More context alone did not solve small-object separability.
+- It did not create a stable recall or AP advantage early enough to justify full training.
+
+## Current Research Direction
+
+Keep the useful part of A v1:
+
+```text
+high-resolution small-object feature enhancement around P3
+```
+
+Avoid the failed pattern:
+
+```text
+broad smoothing, broad low-level detail injection, and query quota changes
+```
+
+Next ideas should be selective. A promising module should decide where to enhance small-object detail and where to ignore background texture. It should be a clear backbone or neck change, not a decoder-input patch.
+
+## Early Stopping Lesson
+
+Use same-epoch comparison against baseline and A v1. A run that has no clear advantage by epoch 30-40 can be stopped early if it is a lightweight variant and all main metrics are below baseline/A v1.
+
+For more serious candidates, continue to epoch 100-180 only if at least one target metric has a stable advantage. If a run is below baseline/A v1 by epoch 200-250 and best AP has not improved for about 10 epochs, stop manually.
