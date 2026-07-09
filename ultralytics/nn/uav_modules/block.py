@@ -12,7 +12,8 @@ from ..modules.block import get_activation, ConvNormLayer, WTConvNormLayer,Basic
 
 __all__ = [
     'DySample', 'SPDConv', 'MFFF', 'FrequencyFocusedDownSampling', 'SemanticAlignmenCalibration',
-    'P3Refine', 'NRP3CBAM', 'MSNoiseGate', 'P2GuidedP3Enhance'
+    'P3Refine', 'NRP3CBAM', 'NRP3Lite', 'NRP3DropPath', 'P2InformationEnhance', 'MSNoiseGate',
+    'P2GuidedP3Enhance', 'StemDown'
 ]
 
 
@@ -270,6 +271,106 @@ class NRP3CBAM(nn.Module):
         return x + self.gamma * self.expand(y)
 
 
+class NRP3Lite(nn.Module):
+    """Lite P3 residual enhancement that keeps channel gating and removes spatial CBAM noise."""
+
+    def __init__(self, dim, e=0.5, gamma=0.075):
+        super().__init__()
+        hidden = int(dim * e)
+        mid = max(hidden // 4, 16)
+        self.reduce = Conv(dim, hidden, 1)
+        self.local = DWConv(hidden, hidden, 3)
+        self.context = DWConv(hidden, hidden, 5, d=2)
+        self.frequency = FFM(hidden)
+        self.channel_mlp = nn.Sequential(
+            nn.Conv2d(hidden, mid, 1, bias=False),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(mid, hidden, 1, bias=False),
+        )
+        self.expand = Conv(hidden, dim, 1, act=False)
+        self.gamma = nn.Parameter(torch.tensor(gamma))
+
+    def forward(self, x):
+        y = self.reduce(x)
+        y = self.local(y) + self.context(y) + self.frequency(y)
+        avg_attn = self.channel_mlp(F.adaptive_avg_pool2d(y, 1))
+        max_attn = self.channel_mlp(F.adaptive_max_pool2d(y, 1))
+        y = y * torch.sigmoid(avg_attn + max_attn)
+        return x + self.gamma * self.expand(y)
+
+
+class NRP3DropPath(nn.Module):
+    """NRP3 enhancement with stochastic depth applied only to the residual delta."""
+
+    def __init__(self, dim, e=0.5, drop_prob=0.05):
+        super().__init__()
+        hidden = int(dim * e)
+        mid = max(hidden // 4, 16)
+        self.reduce = Conv(dim, hidden, 1)
+        self.local = DWConv(hidden, hidden, 3)
+        self.context = DWConv(hidden, hidden, 5, d=2)
+        self.frequency = FFM(hidden)
+        self.channel_mlp = nn.Sequential(
+            nn.Conv2d(hidden, mid, 1, bias=False),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(mid, hidden, 1, bias=False),
+        )
+        self.spatial = nn.Conv2d(2, 1, kernel_size=7, padding=3, bias=False)
+        self.expand = Conv(hidden, dim, 1, act=False)
+        self.gamma = nn.Parameter(torch.tensor(0.1))
+        self.drop_prob = drop_prob
+
+    def _drop_path(self, x):
+        if self.drop_prob == 0.0 or not self.training:
+            return x
+        keep_prob = 1.0 - self.drop_prob
+        shape = (x.shape[0],) + (1,) * (x.ndim - 1)
+        mask = x.new_empty(shape).bernoulli_(keep_prob)
+        return x.div(keep_prob) * mask
+
+    def forward(self, x):
+        y = self.reduce(x)
+        y = self.local(y) + self.context(y) + self.frequency(y)
+        avg_attn = self.channel_mlp(F.adaptive_avg_pool2d(y, 1))
+        max_attn = self.channel_mlp(F.adaptive_max_pool2d(y, 1))
+        y = y * torch.sigmoid(avg_attn + max_attn)
+        spatial_attn = torch.cat([torch.mean(y, dim=1, keepdim=True), torch.max(y, dim=1, keepdim=True)[0]], dim=1)
+        y = y * torch.sigmoid(self.spatial(spatial_attn))
+        delta = self.expand(y)
+        return x + self.gamma * self._drop_path(delta)
+
+
+class P2InformationEnhance(nn.Module):
+    """Information-guided P2 enhancement for weak tiny-object regions."""
+
+    def __init__(self, dim, e=0.5, gamma=0.1):
+        super().__init__()
+        hidden = max(int(dim * e), 32)
+        self.feature_proj = nn.Conv2d(dim, hidden, 1, bias=True)
+        self.detail_proj = nn.Conv2d(dim, hidden, 1, bias=True)
+        self.local = nn.Sequential(
+            nn.Conv2d(hidden, hidden, 3, padding=1, groups=hidden, bias=True),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(hidden, hidden, 1, bias=True),
+            nn.ReLU(inplace=True),
+        )
+        self.info_head = nn.Sequential(
+            nn.Conv2d(hidden, hidden, 3, padding=1, groups=hidden, bias=True),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(hidden, 1, 1, bias=True),
+        )
+        self.expand = nn.Conv2d(hidden, dim, 1, bias=True)
+        self.gamma = nn.Parameter(torch.tensor(gamma))
+        nn.init.zeros_(self.expand.weight)
+        nn.init.zeros_(self.expand.bias)
+
+    def forward(self, x):
+        detail = torch.abs(x - F.avg_pool2d(x, kernel_size=3, stride=1, padding=1))
+        y = self.local(self.feature_proj(x) + self.detail_proj(detail))
+        info = torch.sigmoid(self.info_head(y))
+        return x + self.gamma * info * self.expand(y)
+
+
 class P2GuidedP3Enhance(nn.Module):
     """P2-guided P3 enhancement for small, dense UAV targets.
 
@@ -345,6 +446,24 @@ class MSNoiseGate(nn.Module):
         gate = self.noise_gate(noise)
         refined = gate * self.smooth(x) + (1 - gate) * low
         return x + self.gamma * (refined - x)
+
+
+class StemDown(nn.Module):
+    """Early downsample with parallel stride-conv and MaxPool branches."""
+
+    def __init__(self, c1, c2):
+        super().__init__()
+        c_pool = c2 // 2
+        c_conv = c2 - c_pool
+        self.conv_branch = Conv(c1, c_conv, 3, 2, 1)
+        self.pool_branch = nn.Sequential(
+            nn.MaxPool2d(kernel_size=3, stride=2, padding=1),
+            Conv(c1, c_pool, 1, 1),
+        )
+
+    def forward(self, x):
+        return torch.cat((self.conv_branch(x), self.pool_branch(x)), dim=1)
+
 
 class ADown(nn.Module): # Downsample x2分支
     def __init__(self, c1, c2):  
