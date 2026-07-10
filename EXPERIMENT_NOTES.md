@@ -32,7 +32,7 @@ AP50: 0.52638
 AP50-95: 0.32886
 ```
 
-P2Info, stopped manually at epoch 256:
+P2Info, completed with `patience=20` early stopping at epoch 256:
 
 ```text
 config: ultralytics/cfg/models/uavdetr-r18-p2info.yaml
@@ -46,6 +46,8 @@ path: results_archive/uavdetr_r18_p2info_visdrone640
 ```
 
 P2Info is the highest observed checkpoint so far. It exceeds the baseline best by 0.00505 AP50-95 and NRP3 best by 0.00143. The last epoch remained at 0.33016 AP50-95, so the gain is not a single-epoch spike.
+
+The maximum budget is 400 epochs, but all main experiments use `patience=20` and report the best checkpoint. P2Info peaked at epoch 236 and ended 20 epochs later, so it is a final single-module ablation and does not need to be forced to epoch 400.
 
 ## What Has Worked
 

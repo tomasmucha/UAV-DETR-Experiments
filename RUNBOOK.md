@@ -59,7 +59,7 @@ Highest observed P2Info checkpoint:
 ```text
 run: uavdetr_r18_p2info_visdrone640
 config: ultralytics/cfg/models/uavdetr-r18-p2info.yaml
-stopped epoch: 256
+early-stop epoch: 256 (`patience=20`)
 best epoch: 236
 AP50: 0.52649
 AP50-95: 0.33029
@@ -69,6 +69,8 @@ path: results_archive/uavdetr_r18_p2info_visdrone640
 ```
 
 Treat P2Info as the current highest observed checkpoint and NRP3 as the established completed A-module reference. P2Info improves AP50-95 by 0.00505 over baseline and 0.00143 over NRP3.
+
+The 400-epoch setting is a maximum budget. Use the shared `patience=20` early-stopping rule and report each run's best checkpoint; do not spend GPU time forcing a converged run to epoch 400.
 
 ## AutoDL Training Template
 
