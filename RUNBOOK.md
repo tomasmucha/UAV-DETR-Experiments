@@ -54,7 +54,21 @@ P: 0.63733
 R: 0.50875
 ```
 
-Treat `uavdetr-r18-nrp3.yaml` as the current best ablation, not as a final thesis contribution. The gain is real but small.
+Highest observed P2Info checkpoint:
+
+```text
+run: uavdetr_r18_p2info_visdrone640
+config: ultralytics/cfg/models/uavdetr-r18-p2info.yaml
+stopped epoch: 256
+best epoch: 236
+AP50: 0.52649
+AP50-95: 0.33029
+P: 0.64205
+R: 0.50786
+path: results_archive/uavdetr_r18_p2info_visdrone640
+```
+
+Treat P2Info as the current highest observed checkpoint and NRP3 as the established completed A-module reference. P2Info improves AP50-95 by 0.00505 over baseline and 0.00143 over NRP3.
 
 ## AutoDL Training Template
 

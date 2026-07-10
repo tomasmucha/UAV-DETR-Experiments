@@ -32,9 +32,36 @@ AP50: 0.52638
 AP50-95: 0.32886
 ```
 
-A v1 is the best known result so far. It improves recall and AP slightly, but the gain is too small to be the final thesis contribution by itself.
+P2Info, stopped manually at epoch 256:
+
+```text
+config: ultralytics/cfg/models/uavdetr-r18-p2info.yaml
+run: uavdetr_r18_p2info_visdrone640
+best epoch: 236
+P: 0.64205
+R: 0.50786
+AP50: 0.52649
+AP50-95: 0.33029
+path: results_archive/uavdetr_r18_p2info_visdrone640
+```
+
+P2Info is the highest observed checkpoint so far. It exceeds the baseline best by 0.00505 AP50-95 and NRP3 best by 0.00143. The last epoch remained at 0.33016 AP50-95, so the gain is not a single-epoch spike.
 
 ## What Has Worked
+
+### P2Info: Information-Guided P2 Enhancement
+
+File:
+
+```text
+ultralytics/cfg/models/uavdetr-r18-p2info.yaml
+```
+
+Interpretation:
+
+- Selective P2 enhancement is independently effective and stronger than generic P2-to-P3 detail injection.
+- The final 30 epochs all exceeded the baseline final best; 19 of 30 exceeded the NRP3 final best.
+- Keep P2Info as the strongest current B module and use its archived best checkpoint for final validation and ablation.
 
 ### A v1: NRP3CBAM
 
