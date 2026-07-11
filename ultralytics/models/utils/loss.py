@@ -394,3 +394,101 @@ class RTDETRDetectionLoss(DETRLoss):
             else:
                 dn_match_indices.append((torch.zeros([0], dtype=torch.long), torch.zeros([0], dtype=torch.long)))
         return dn_match_indices
+
+
+class RTDETRFDRDetectionLoss(RTDETRDetectionLoss):
+    """RT-DETR loss extended with D-FINE's Fine-Grained Localization loss.
+
+    Portions Copyright (c) 2024 The D-FINE Authors. Adapted from
+    https://github.com/Peterande/D-FINE (Apache-2.0). The surrounding
+    matching, box and classification losses remain the UAV-DETR/Ultralytics ones.
+    """
+
+    def __init__(self, *args, reg_max=32, reg_scale=4.0, up=0.5, fgl_gain=0.15, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.reg_max = reg_max
+        self.reg_scale = float(reg_scale)
+        self.up = float(up)
+        self.fgl_gain = fgl_gain
+
+    def _weighting_function(self, device, dtype):
+        upper_bound1 = abs(self.up * self.reg_scale)
+        upper_bound2 = upper_bound1 * 2
+        step = (upper_bound1 + 1) ** (2 / (self.reg_max - 2))
+        left = [-step**i + 1 for i in range(self.reg_max // 2 - 1, 0, -1)]
+        right = [step**i - 1 for i in range(1, self.reg_max // 2)]
+        return torch.tensor([-upper_bound2, *left, 0.0, *right, upper_bound2], device=device, dtype=dtype)
+
+    def _bbox2distance(self, points, boxes):
+        """Translate matched cxcywh boxes into adjacent FDR bins and interpolation weights."""
+        scale = abs(self.reg_scale)
+        x1 = boxes[:, 0] - boxes[:, 2] / 2
+        y1 = boxes[:, 1] - boxes[:, 3] / 2
+        x2 = boxes[:, 0] + boxes[:, 2] / 2
+        y2 = boxes[:, 1] + boxes[:, 3] / 2
+        denom_w = points[:, 2] / scale + 1e-16
+        denom_h = points[:, 3] / scale + 1e-16
+        values = torch.stack((
+            (points[:, 0] - x1) / denom_w - 0.5 * scale,
+            (points[:, 1] - y1) / denom_h - 0.5 * scale,
+            (x2 - points[:, 0]) / denom_w - 0.5 * scale,
+            (y2 - points[:, 1]) / denom_h - 0.5 * scale,
+        ), -1).reshape(-1)
+
+        project = self._weighting_function(values.device, values.dtype)
+        diffs = project.unsqueeze(0) - values.unsqueeze(1)
+        raw_left_idx = (diffs <= 0).sum(1) - 1
+        below_range = raw_left_idx < 0
+        above_range = raw_left_idx >= self.reg_max
+        left_idx = raw_left_idx.clamp(0, self.reg_max - 1)
+        left_value, right_value = project[left_idx], project[left_idx + 1]
+        left_delta = (values - left_value).abs()
+        right_delta = (right_value - values).abs()
+        right_weight = (left_delta / (left_delta + right_delta).clamp_min(1e-12)).clamp(0, 1)
+        left_weight = 1 - right_weight
+        right_weight[below_range], left_weight[below_range] = 0.0, 1.0
+        right_weight[above_range], left_weight[above_range] = 1.0, 0.0
+        return left_idx.detach(), right_weight.detach(), left_weight.detach()
+
+    def _fgl_layer(self, pred_bboxes, pred_scores, pred_corners, ref_points, batch, match_indices=None):
+        if match_indices is None:
+            match_indices = self.matcher(pred_bboxes, pred_scores, batch['bboxes'], batch['cls'], batch['gt_groups'])
+        idx, gt_idx = self._get_index(match_indices)
+        if not len(gt_idx):
+            return pred_corners.sum() * 0
+
+        matched_boxes = pred_bboxes[idx]
+        target_boxes = batch['bboxes'][gt_idx]
+        matched_corners = pred_corners[idx].reshape(-1, self.reg_max + 1)
+        matched_refs = ref_points[idx].detach()
+        left_idx, right_weight, left_weight = self._bbox2distance(matched_refs, target_boxes)
+        loss = (F.cross_entropy(matched_corners, left_idx, reduction='none') * left_weight +
+                F.cross_entropy(matched_corners, left_idx + 1, reduction='none') * right_weight)
+        quality = bbox_iou(matched_boxes.detach(), target_boxes, xywh=True).reshape(-1).clamp_min(0)
+        quality = quality.unsqueeze(-1).expand(-1, 4).reshape(-1)
+        return loss.mul(quality).sum() / max(len(target_boxes), 1) * self.fgl_gain
+
+    def forward_fdr(self, pred_bboxes, pred_scores, pred_corners, ref_points, batch,
+                    dn_bboxes=None, dn_scores=None, dn_corners=None, dn_refs=None, dn_meta=None):
+        """Compute FGL for decoder layers while preserving standard RT-DETR losses."""
+        losses = {
+            'loss_fgl': self._fgl_layer(
+                pred_bboxes[-1], pred_scores[-1], pred_corners[-1], ref_points[-1], batch)
+        }
+        aux = pred_corners.sum() * 0
+        for boxes, scores, corners, refs in zip(pred_bboxes[:-1], pred_scores[:-1],
+                                                pred_corners[:-1], ref_points[:-1]):
+            aux = aux + self._fgl_layer(boxes, scores, corners, refs, batch)
+        losses['loss_fgl_aux'] = aux
+
+        if dn_meta is not None and dn_corners is not None:
+            match_indices = self.get_dn_match_indices(
+                dn_meta['dn_pos_idx'], dn_meta['dn_num_group'], batch['gt_groups'])
+            dn_loss = dn_corners.sum() * 0
+            for boxes, scores, corners, refs in zip(dn_bboxes, dn_scores, dn_corners, dn_refs):
+                dn_loss = dn_loss + self._fgl_layer(
+                    boxes, scores, corners, refs, batch, match_indices=match_indices)
+            losses['loss_fgl_dn'] = dn_loss
+        else:
+            losses['loss_fgl_dn'] = pred_corners.sum() * 0
+        return losses

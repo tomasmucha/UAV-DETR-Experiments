@@ -443,9 +443,10 @@ class RTDETRDetectionModel(DetectionModel):
 
     def init_criterion(self):
         """Initialize the loss criterion for the RTDETRDetectionModel."""
-        from ultralytics.models.utils.loss import RTDETRDetectionLoss
+        from ultralytics.models.utils.loss import RTDETRDetectionLoss, RTDETRFDRDetectionLoss
 
-        return RTDETRDetectionLoss(nc=self.nc, use_vfl=True, use_sl=False, use_emasl=False, use_svfl=False, use_emasvfl=False)
+        criterion_cls = RTDETRFDRDetectionLoss if isinstance(self.model[-1], RTDETRFDRDecoder) else RTDETRDetectionLoss
+        return criterion_cls(nc=self.model[-1].nc, use_vfl=True, use_sl=False, use_emasl=False, use_svfl=False, use_emasvfl=False)
 
     def loss(self, batch, preds=None):
         """
@@ -473,21 +474,49 @@ class RTDETRDetectionModel(DetectionModel):
             'gt_groups': gt_groups}
 
         preds = self.predict(img, batch=targets) if preds is None else preds
-        dec_bboxes, dec_scores, enc_bboxes, enc_scores, dn_meta = preds if self.training else preds[1]
+        outputs = preds if self.training else preds[1]
+        dec_bboxes, dec_scores, enc_bboxes, enc_scores, dn_meta = outputs[:5]
+        fdr_outputs = outputs[5:] if len(outputs) > 5 else None
         if dn_meta is None:
             dn_bboxes, dn_scores = None, None
+            dn_corners, dn_refs = None, None
+            fdr_dn_bboxes, fdr_dn_scores = None, None
+            if fdr_outputs:
+                dec_corners, dec_refs, pre_bboxes, pre_scores = fdr_outputs
+                fdr_outputs = dec_corners, dec_refs
         else:
             dn_bboxes, dec_bboxes = torch.split(dec_bboxes, dn_meta['dn_num_split'], dim=2)
             dn_scores, dec_scores = torch.split(dec_scores, dn_meta['dn_num_split'], dim=2)
+            if fdr_outputs:
+                dec_corners, dec_refs, pre_bboxes, pre_scores = fdr_outputs
+                fdr_dn_bboxes, fdr_dn_scores = dn_bboxes, dn_scores
+                dn_corners, dec_corners = torch.split(dec_corners, dn_meta['dn_num_split'], dim=2)
+                dn_refs, dec_refs = torch.split(dec_refs, dn_meta['dn_num_split'], dim=2)
+                dn_pre_bboxes, pre_bboxes = torch.split(pre_bboxes, dn_meta['dn_num_split'], dim=1)
+                dn_pre_scores, pre_scores = torch.split(pre_scores, dn_meta['dn_num_split'], dim=1)
+                dn_bboxes = torch.cat([dn_pre_bboxes.unsqueeze(0), dn_bboxes])
+                dn_scores = torch.cat([dn_pre_scores.unsqueeze(0), dn_scores])
+                fdr_outputs = dec_corners, dec_refs
 
-        dec_bboxes = torch.cat([enc_bboxes.unsqueeze(0), dec_bboxes])  # (7, bs, 300, 4)
-        dec_scores = torch.cat([enc_scores.unsqueeze(0), dec_scores])
+        fdr_dec_bboxes, fdr_dec_scores = dec_bboxes, dec_scores
+        if fdr_outputs:
+            dec_bboxes = torch.cat([enc_bboxes.unsqueeze(0), pre_bboxes.unsqueeze(0), dec_bboxes])
+            dec_scores = torch.cat([enc_scores.unsqueeze(0), pre_scores.unsqueeze(0), dec_scores])
+        else:
+            dec_bboxes = torch.cat([enc_bboxes.unsqueeze(0), dec_bboxes])  # encoder + decoder layers
+            dec_scores = torch.cat([enc_scores.unsqueeze(0), dec_scores])
 
         loss = self.criterion((dec_bboxes, dec_scores),
                               targets,
                               dn_bboxes=dn_bboxes,
                               dn_scores=dn_scores,
                               dn_meta=dn_meta)
+        if fdr_outputs:
+            dec_corners, dec_refs = fdr_outputs
+            loss.update(self.criterion.forward_fdr(
+                fdr_dec_bboxes, fdr_dec_scores, dec_corners, dec_refs, targets,
+                dn_bboxes=fdr_dn_bboxes, dn_scores=fdr_dn_scores, dn_corners=dn_corners,
+                dn_refs=dn_refs, dn_meta=dn_meta))
         # NOTE: There are like 12 losses in RTDETR, backward with all losses but only show the main three losses.
         return sum(loss.values()), torch.as_tensor([loss[k].detach() for k in ['loss_giou', 'loss_class', 'loss_bbox']],
                                                    device=img.device)
@@ -828,7 +857,7 @@ def parse_model(d, ch, verbose=True, warehouse_manager=None):  # model_dict, inp
             args.append([ch[x] for x in f])
             if m is Segment:
                 args[2] = make_divisible(min(args[2], max_channels) * width, 8)
-        elif m is RTDETRDecoder:  # special case, channels arg must be passed in index 1
+        elif m in {RTDETRDecoder, RTDETRFDRDecoder}:  # special case, channels arg must be passed in index 1
             args.insert(1, [ch[x] for x in f])
         elif isinstance(m, str):
             t = m
