@@ -452,7 +452,10 @@ class RTDETRFDRDetectionLoss(RTDETRDetectionLoss):
 
     def _fgl_layer(self, pred_bboxes, pred_scores, pred_corners, ref_points, batch, match_indices=None):
         if match_indices is None:
-            match_indices = self.matcher(pred_bboxes, pred_scores, batch['bboxes'], batch['cls'], batch['gt_groups'])
+            # torch.split returns views whose stride layout is rejected by the older
+            # matcher implementation's view(); make the FDR branch version-agnostic.
+            match_indices = self.matcher(pred_bboxes.contiguous(), pred_scores.contiguous(),
+                                         batch['bboxes'], batch['cls'], batch['gt_groups'])
         idx, gt_idx = self._get_index(match_indices)
         if not len(gt_idx):
             return pred_corners.sum() * 0
