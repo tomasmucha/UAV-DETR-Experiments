@@ -72,6 +72,22 @@ Treat P2Info as the current highest observed checkpoint and NRP3 as the establis
 
 The 400-epoch setting is a maximum budget. Use the shared `patience=20` early-stopping rule and report each run's best checkpoint; do not spend GPU time forcing a converged run to epoch 400.
 
+Completed P2Info + NRP3 combination ablation:
+
+```text
+run: uavdetr_r18_p2info_nrp3_visdrone640
+config: ultralytics/cfg/models/uavdetr-r18-p2info-nrp3.yaml
+early-stop epoch: 258 (`patience=20`)
+best epoch: 238
+AP50: 0.51951
+AP50-95: 0.32631
+P: 0.63863
+R: 0.49928
+path: results_archive/uavdetr_r18_p2info_nrp3_visdrone640
+```
+
+Keep this run in the main archive as a formal A+B ablation. It exceeds the baseline AP50-95 by 0.00107 but remains below NRP3 by 0.00255 and P2Info by 0.00398, so it is a no-synergy result rather than the final combined method.
+
 ## AutoDL Training Template
 
 ```bash

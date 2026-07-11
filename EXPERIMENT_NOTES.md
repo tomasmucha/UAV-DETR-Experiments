@@ -49,6 +49,21 @@ P2Info is the highest observed checkpoint so far. It exceeds the baseline best b
 
 The maximum budget is 400 epochs, but all main experiments use `patience=20` and report the best checkpoint. P2Info peaked at epoch 236 and ended 20 epochs later, so it is a final single-module ablation and does not need to be forced to epoch 400.
 
+P2Info + NRP3, completed with `patience=20` early stopping at epoch 258:
+
+```text
+config: ultralytics/cfg/models/uavdetr-r18-p2info-nrp3.yaml
+run: uavdetr_r18_p2info_nrp3_visdrone640
+best epoch: 238
+P: 0.63863
+R: 0.49928
+AP50: 0.51951
+AP50-95: 0.32631
+path: results_archive/uavdetr_r18_p2info_nrp3_visdrone640
+```
+
+The combination improves AP50-95 by 0.00107 over the baseline best, but trails NRP3 by 0.00255 and P2Info by 0.00398. It is retained as a completed mainline A+B ablation, but it does not demonstrate synergy and should not be presented as the final combined method.
+
 ## What Has Worked
 
 ### P2Info: Information-Guided P2 Enhancement
@@ -250,6 +265,8 @@ Why it failed:
 - It did not create a stable recall or AP advantage early enough to justify full training.
 
 ## Current Research Direction
+
+The completed P2Info + NRP3 run shows that independent insertion locations do not guarantee empirical synergy. Direct stacking diluted the P2Info AP50 and recall gains. Any follow-up combination treatment must change the information interaction or fusion mechanism rather than rerun the same stack unchanged.
 
 Keep the useful part of A v1:
 
