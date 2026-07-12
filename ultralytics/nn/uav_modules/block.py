@@ -12,7 +12,8 @@ from ..modules.block import get_activation, ConvNormLayer, WTConvNormLayer,Basic
 
 __all__ = [
     'DySample', 'SPDConv', 'MFFF', 'FrequencyFocusedDownSampling', 'SemanticAlignmenCalibration',
-    'P3Refine', 'NRP3CBAM', 'NRP3Lite', 'NRP3DropPath', 'P2InformationEnhance', 'MSNoiseGate',
+    'P3Refine', 'NRP3CBAM', 'NRP3Lite', 'NRP3DropPath', 'P2InformationEnhance',
+    'P2InformationEnhanceCalibrated', 'MSNoiseGate',
     'P2GuidedP3Enhance', 'StemDown'
 ]
 
@@ -365,10 +366,33 @@ class P2InformationEnhance(nn.Module):
         nn.init.zeros_(self.expand.bias)
 
     def forward(self, x):
+        return x + self.gamma * self._gated_delta(x)
+
+    def _gated_delta(self, x):
         detail = torch.abs(x - F.avg_pool2d(x, kernel_size=3, stride=1, padding=1))
         y = self.local(self.feature_proj(x) + self.detail_proj(detail))
         info = torch.sigmoid(self.info_head(y))
-        return x + self.gamma * info * self.expand(y)
+        return info * self.expand(y)
+
+
+class P2InformationEnhanceCalibrated(P2InformationEnhance):
+    """P2Info with a bounded learnable residual scale for stable FDR interaction."""
+
+    def __init__(self, dim, e=0.5, gamma=0.1, gamma_max=0.6):
+        if not 0.0 < gamma < gamma_max:
+            raise ValueError(f"Expected 0 < gamma < gamma_max, got gamma={gamma}, gamma_max={gamma_max}")
+        super().__init__(dim, e=e, gamma=gamma)
+        del self.gamma
+        ratio = gamma / gamma_max
+        self.raw_gamma = nn.Parameter(torch.tensor(math.log(ratio / (1.0 - ratio))))
+        self.register_buffer("gamma_max", torch.tensor(float(gamma_max)))
+
+    @property
+    def effective_gamma(self):
+        return self.gamma_max * torch.sigmoid(self.raw_gamma)
+
+    def forward(self, x):
+        return x + self.effective_gamma * self._gated_delta(x)
 
 
 class P2GuidedP3Enhance(nn.Module):
