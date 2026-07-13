@@ -473,6 +473,12 @@ class RTDETRDetectionModel(DetectionModel):
             'batch_idx': batch_idx.to(img.device, dtype=torch.long).view(-1),
             'gt_groups': gt_groups}
 
+        # Optional feature-side auxiliary modules (e.g. CVPR 2025 PGDP) need
+        # normalized boxes while preserving the standard tensor-only YAML flow.
+        aux_modules = [m for m in self.model.modules() if hasattr(m, 'set_targets') and hasattr(m, 'consume_aux_loss')]
+        for module in aux_modules:
+            module.set_targets(targets, img.shape[-2:])
+
         preds = self.predict(img, batch=targets) if preds is None else preds
         outputs = preds if self.training else preds[1]
         dec_bboxes, dec_scores, enc_bboxes, enc_scores, dn_meta = outputs[:5]
@@ -517,6 +523,10 @@ class RTDETRDetectionModel(DetectionModel):
                 fdr_dec_bboxes, fdr_dec_scores, dec_corners, dec_refs, targets,
                 dn_bboxes=fdr_dn_bboxes, dn_scores=fdr_dn_scores, dn_corners=dn_corners,
                 dn_refs=dn_refs, dn_meta=dn_meta))
+        for i, module in enumerate(aux_modules):
+            aux_loss = module.consume_aux_loss()
+            if aux_loss is not None:
+                loss[f'loss_feature_aux_{i}'] = aux_loss
         # NOTE: There are like 12 losses in RTDETR, backward with all losses but only show the main three losses.
         return sum(loss.values()), torch.as_tensor([loss[k].detach() for k in ['loss_giou', 'loss_class', 'loss_bbox']],
                                                    device=img.device)
@@ -831,6 +841,10 @@ def parse_model(d, ch, verbose=True, warehouse_manager=None):  # model_dict, inp
             c1 = [ch[x] for x in f]
             c2 = c1[1]
             args = [c1[0], c1[1], *args]
+        elif m is PGDPEnhance:
+            c1 = [ch[x] for x in f]
+            c2 = c1[0]
+            args = [c1, *args]
         elif m in {HGStem, HGBlock}:
             c1, cm, c2 = ch[f], args[0], args[1]
             args = [c1, cm, c2, *args[2:]]
