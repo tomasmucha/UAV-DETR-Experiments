@@ -167,6 +167,9 @@ def main():
         raise RuntimeError(f"Expected one shared P2Info gamma value, got {initial_values}")
     original_gamma = next(iter(initial_values.values()))
     candidates = unique_values([original_gamma, *args.gammas])
+    del detector
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
 
     target = None
     if args.module_b_ap is not None:
@@ -180,9 +183,15 @@ def main():
 
     rows = []
     for gamma in candidates:
-        set_gamma(modules, gamma)
+        # Ultralytics validation fuses Conv+BN layers in place. Reusing one detector across
+        # candidates would therefore validate the first gamma correctly but try to fuse an
+        # already-fused model on the second call. Reload the same source checkpoint for every
+        # candidate so all gamma values start from an identical, unfused model.
+        candidate_detector = RTDETR(args.checkpoint)
+        candidate_modules = p2info_modules(candidate_detector.model)
+        set_gamma(candidate_modules, gamma)
         run_name = f"{args.name}_gamma_{gamma_slug(gamma)}"
-        metrics = detector.val(
+        metrics = candidate_detector.val(
             data=args.data,
             split="val",
             imgsz=args.imgsz,
@@ -198,6 +207,9 @@ def main():
         row = metric_row(metrics, gamma, original_gamma, target)
         rows.append(row)
         print(json.dumps(row, ensure_ascii=False))
+        del candidate_detector
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
 
     best = max(rows, key=lambda row: row["map50_95"])
     output_dir = Path(args.project) / args.name
