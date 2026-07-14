@@ -864,7 +864,8 @@ def parse_model(d, ch, verbose=True, warehouse_manager=None):  # model_dict, inp
                 n = 1
         elif m in {
             MFFF, P3Refine, NRP3CBAM, NRP3Lite, NRP3DropPath,
-            P2InformationEnhance, P2InformationEnhanceCalibrated, MSNoiseGate
+            P2InformationEnhance, P2InformationEnhanceCalibrated, MSNoiseGate,
+            RetrieverDictionary,
         }:
             c2 = ch[f]
             args = [c2, *args]
