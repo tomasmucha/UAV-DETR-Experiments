@@ -411,12 +411,155 @@ class RTDETRFDRDetectionLoss(RTDETRDetectionLoss):
     matching, box and classification losses remain the UAV-DETR/Ultralytics ones.
     """
 
-    def __init__(self, *args, reg_max=32, reg_scale=4.0, up=0.5, fgl_gain=0.15, **kwargs):
+    def __init__(self,
+                 *args,
+                 reg_max=32,
+                 reg_scale=4.0,
+                 up=0.5,
+                 fgl_gain=0.15,
+                 use_go_lsd=False,
+                 ddf_gain=1.5,
+                 distill_temperature=5.0,
+                 **kwargs):
         super().__init__(*args, **kwargs)
         self.reg_max = reg_max
         self.reg_scale = float(reg_scale)
         self.up = float(up)
         self.fgl_gain = fgl_gain
+        self.use_go_lsd = bool(use_go_lsd)
+        self.ddf_gain = float(ddf_gain)
+        self.distill_temperature = float(distill_temperature)
+        self._ddf_balance = None
+
+    @staticmethod
+    def _get_go_indices(indices, indices_aux_list):
+        """Build D-FINE's global matching union across decoder-side predictions."""
+        merged = [(src.clone(), dst.clone()) for src, dst in indices]
+        for indices_aux in indices_aux_list:
+            merged = [
+                (torch.cat((src, aux_src)), torch.cat((dst, aux_dst)))
+                for (src, dst), (aux_src, aux_dst) in zip(merged, indices_aux)
+            ]
+
+        results = []
+        for src, dst in merged:
+            if not len(src):
+                results.append((src, dst))
+                continue
+            pairs = torch.stack((src, dst), dim=1)
+            unique, counts = torch.unique(pairs, return_counts=True, dim=0)
+            unique = unique[torch.argsort(counts, descending=True)]
+            query_to_target = {}
+            for query_idx, target_idx in unique.tolist():
+                query_to_target.setdefault(query_idx, target_idx)
+            device = src.device
+            results.append((
+                torch.tensor(list(query_to_target), device=device, dtype=torch.long),
+                torch.tensor(list(query_to_target.values()), device=device, dtype=torch.long),
+            ))
+        return results
+
+    def _match_layers(self, pred_bboxes, pred_scores, batch):
+        """Match every supplied decoder-side prediction against the same targets."""
+        return [
+            self.matcher(boxes.contiguous(), scores.contiguous(),
+                         batch['bboxes'], batch['cls'], batch['gt_groups'])
+            for boxes, scores in zip(pred_bboxes, pred_scores)
+        ]
+
+    def _forward_go(self, pred_bboxes, pred_scores, batch):
+        """Use per-layer matches for classification and their union for box regression."""
+        self.device = pred_bboxes.device
+        gt_cls, gt_bboxes, gt_groups = batch['cls'], batch['bboxes'], batch['gt_groups']
+        layer_matches = self._match_layers(pred_bboxes, pred_scores, batch)
+        go_indices = self._get_go_indices(layer_matches[-1], layer_matches[:-1])
+
+        total_loss = self._get_loss(
+            pred_bboxes[-1], pred_scores[-1], gt_bboxes, gt_cls, gt_groups,
+            match_indices=layer_matches[-1])
+        go_index, go_target_index = self._get_index(go_indices)
+        go_boxes, go_targets = pred_bboxes[-1][go_index], gt_bboxes[go_target_index]
+        total_loss.update(self._get_loss_bbox(go_boxes, go_targets))
+
+        if self.aux_loss:
+            aux_loss = torch.zeros(3, device=pred_bboxes.device)
+            for boxes, scores, own_indices in zip(pred_bboxes[:-1], pred_scores[:-1], layer_matches[:-1]):
+                layer_loss = self._get_loss(
+                    boxes, scores, gt_bboxes, gt_cls, gt_groups, match_indices=own_indices)
+                go_boxes, go_targets = boxes[go_index], gt_bboxes[go_target_index]
+                layer_loss.update(self._get_loss_bbox(go_boxes, go_targets))
+                aux_loss[0] += layer_loss['loss_class']
+                aux_loss[1] += layer_loss['loss_bbox']
+                aux_loss[2] += layer_loss['loss_giou']
+            total_loss.update({
+                'loss_class_aux': aux_loss[0],
+                'loss_bbox_aux': aux_loss[1],
+                'loss_giou_aux': aux_loss[2],
+            })
+        return total_loss
+
+    def forward(self, preds, batch, dn_bboxes=None, dn_scores=None, dn_meta=None):
+        """Compute standard FDR losses or GO-LSD global-optimal box losses."""
+        if not self.use_go_lsd:
+            return super().forward(preds, batch, dn_bboxes, dn_scores, dn_meta)
+
+        self._ddf_balance = None
+        pred_bboxes, pred_scores = preds
+        total_loss = self._forward_go(pred_bboxes, pred_scores, batch)
+        if dn_meta is not None:
+            match_indices = self.get_dn_match_indices(
+                dn_meta['dn_pos_idx'], dn_meta['dn_num_group'], batch['gt_groups'])
+            dn_loss = DETRLoss.forward(
+                self, dn_bboxes, dn_scores, batch, postfix='_dn', match_indices=match_indices)
+            total_loss.update(dn_loss)
+        else:
+            total_loss.update({f'{key}_dn': value.new_zeros(()) for key, value in total_loss.items()})
+        return total_loss
+
+    def _ddf_layer(self,
+                   pred_bboxes,
+                   pred_corners,
+                   teacher_corners,
+                   teacher_scores,
+                   batch,
+                   match_indices,
+                   use_cached_balance=False):
+        """D-FINE decoupled distribution focal distillation for one student layer."""
+        student = pred_corners.reshape(-1, self.reg_max + 1)
+        teacher = teacher_corners.reshape(-1, self.reg_max + 1)
+        if pred_corners.data_ptr() == teacher_corners.data_ptr():
+            return student.sum() * 0
+
+        idx, gt_idx = self._get_index(match_indices)
+        mask = torch.zeros(teacher_scores.shape[:2], device=teacher_scores.device, dtype=torch.bool)
+        mask[idx] = True
+
+        weights = teacher_scores.detach().sigmoid().amax(dim=-1).clone()
+        if len(gt_idx):
+            target_boxes = batch['bboxes'][gt_idx]
+            matched_boxes = pred_bboxes[idx].detach()
+            ious = bbox_iou(matched_boxes, target_boxes, xywh=True).reshape(-1).clamp(0, 1)
+            weights[idx] = ious.to(weights.dtype)
+
+        mask = mask.unsqueeze(-1).expand(-1, -1, 4).reshape(-1)
+        weights = weights.unsqueeze(-1).expand(-1, -1, 4).reshape(-1).detach()
+        temperature = self.distill_temperature
+        ddf = weights * (temperature ** 2) * F.kl_div(
+            F.log_softmax(student / temperature, dim=-1),
+            F.softmax(teacher.detach() / temperature, dim=-1),
+            reduction='none',
+        ).sum(-1)
+
+        if use_cached_balance and self._ddf_balance is not None:
+            num_pos, num_neg = self._ddf_balance
+        else:
+            batch_scale = 8.0 / max(int(pred_bboxes.shape[0]), 1)
+            num_pos = (mask.sum().to(ddf.dtype) * batch_scale).sqrt()
+            num_neg = ((~mask).sum().to(ddf.dtype) * batch_scale).sqrt()
+            self._ddf_balance = num_pos.detach(), num_neg.detach()
+        pos_loss = ddf[mask].mean() if mask.any() else ddf.new_zeros(())
+        neg_loss = ddf[~mask].mean() if (~mask).any() else ddf.new_zeros(())
+        return (pos_loss * num_pos + neg_loss * num_neg) / (num_pos + num_neg).clamp_min(1e-12)
 
     def _weighting_function(self, device, dtype):
         upper_bound1 = abs(self.up * self.reg_scale)
@@ -479,17 +622,37 @@ class RTDETRFDRDetectionLoss(RTDETRDetectionLoss):
         return loss.mul(quality).sum() / max(len(target_boxes), 1) * self.fgl_gain
 
     def forward_fdr(self, pred_bboxes, pred_scores, pred_corners, ref_points, batch,
-                    dn_bboxes=None, dn_scores=None, dn_corners=None, dn_refs=None, dn_meta=None):
+                    dn_bboxes=None, dn_scores=None, dn_corners=None, dn_refs=None, dn_meta=None,
+                    pre_bboxes=None, pre_scores=None, enc_bboxes=None, enc_scores=None):
         """Compute FGL for decoder layers while preserving standard RT-DETR losses."""
+        go_indices = None
+        if self.use_go_lsd:
+            layer_matches = self._match_layers(pred_bboxes, pred_scores, batch)
+            union_sources = layer_matches[:-1]
+            if pre_bboxes is not None and pre_scores is not None:
+                union_sources.extend(self._match_layers(pre_bboxes.unsqueeze(0), pre_scores.unsqueeze(0), batch))
+            if enc_bboxes is not None and enc_scores is not None:
+                union_sources.extend(self._match_layers(enc_bboxes.unsqueeze(0), enc_scores.unsqueeze(0), batch))
+            go_indices = self._get_go_indices(layer_matches[-1], union_sources)
+
         losses = {
             'loss_fgl': self._fgl_layer(
-                pred_bboxes[-1], pred_scores[-1], pred_corners[-1], ref_points[-1], batch)
+                pred_bboxes[-1], pred_scores[-1], pred_corners[-1], ref_points[-1], batch,
+                match_indices=go_indices)
         }
         aux = pred_corners.sum() * 0
         for boxes, scores, corners, refs in zip(pred_bboxes[:-1], pred_scores[:-1],
                                                 pred_corners[:-1], ref_points[:-1]):
-            aux = aux + self._fgl_layer(boxes, scores, corners, refs, batch)
+            aux = aux + self._fgl_layer(boxes, scores, corners, refs, batch, match_indices=go_indices)
         losses['loss_fgl_aux'] = aux
+
+        if self.use_go_lsd:
+            ddf_aux = pred_corners.sum() * 0
+            for boxes, corners in zip(pred_bboxes[:-1], pred_corners[:-1]):
+                ddf_aux = ddf_aux + self._ddf_layer(
+                    boxes, corners, pred_corners[-1], pred_scores[-1], batch, go_indices)
+            losses['loss_ddf'] = pred_corners[-1].sum() * 0
+            losses['loss_ddf_aux'] = ddf_aux * self.ddf_gain
 
         if dn_meta is not None and dn_corners is not None:
             match_indices = self.get_dn_match_indices(
@@ -499,6 +662,15 @@ class RTDETRFDRDetectionLoss(RTDETRDetectionLoss):
                 dn_loss = dn_loss + self._fgl_layer(
                     boxes, scores, corners, refs, batch, match_indices=match_indices)
             losses['loss_fgl_dn'] = dn_loss
+            if self.use_go_lsd:
+                ddf_dn = dn_corners.sum() * 0
+                for boxes, corners in zip(dn_bboxes[:-1], dn_corners[:-1]):
+                    ddf_dn = ddf_dn + self._ddf_layer(
+                        boxes, corners, dn_corners[-1], dn_scores[-1], batch, match_indices,
+                        use_cached_balance=True)
+                losses['loss_ddf_dn'] = ddf_dn * self.ddf_gain
         else:
             losses['loss_fgl_dn'] = pred_corners.sum() * 0
+            if self.use_go_lsd:
+                losses['loss_ddf_dn'] = pred_corners.sum() * 0
         return losses

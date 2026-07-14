@@ -447,9 +447,16 @@ class RTDETRDetectionModel(DetectionModel):
 
         criterion_cls = RTDETRFDRDetectionLoss if isinstance(self.model[-1], RTDETRFDRDecoder) else RTDETRDetectionLoss
         use_mal = bool(self.yaml.get('use_mal', False))
-        return criterion_cls(nc=self.model[-1].nc, use_vfl=not use_mal, use_mal=use_mal,
-                             mal_gamma=float(self.yaml.get('mal_gamma', 1.5)), use_sl=False,
-                             use_emasl=False, use_svfl=False, use_emasvfl=False)
+        criterion_kwargs = dict(nc=self.model[-1].nc, use_vfl=not use_mal, use_mal=use_mal,
+                                mal_gamma=float(self.yaml.get('mal_gamma', 1.5)), use_sl=False,
+                                use_emasl=False, use_svfl=False, use_emasvfl=False)
+        if criterion_cls is RTDETRFDRDetectionLoss:
+            criterion_kwargs.update(
+                use_go_lsd=bool(self.yaml.get('use_go_lsd', False)),
+                ddf_gain=float(self.yaml.get('ddf_gain', 1.5)),
+                distill_temperature=float(self.yaml.get('distill_temperature', 5.0)),
+            )
+        return criterion_cls(**criterion_kwargs)
 
     def loss(self, batch, preds=None):
         """
@@ -525,7 +532,8 @@ class RTDETRDetectionModel(DetectionModel):
             loss.update(self.criterion.forward_fdr(
                 fdr_dec_bboxes, fdr_dec_scores, dec_corners, dec_refs, targets,
                 dn_bboxes=fdr_dn_bboxes, dn_scores=fdr_dn_scores, dn_corners=dn_corners,
-                dn_refs=dn_refs, dn_meta=dn_meta))
+                dn_refs=dn_refs, dn_meta=dn_meta, pre_bboxes=pre_bboxes, pre_scores=pre_scores,
+                enc_bboxes=enc_bboxes, enc_scores=enc_scores))
         for i, module in enumerate(aux_modules):
             aux_loss = module.consume_aux_loss()
             if aux_loss is not None:
