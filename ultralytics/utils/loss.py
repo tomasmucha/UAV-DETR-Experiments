@@ -153,6 +153,33 @@ class VarifocalLoss(nn.Module):
         return loss
 
 
+class MatchabilityAwareLoss(nn.Module):
+    """Matchability-Aware Loss from DEIM (CVPR 2025).
+
+    Positive targets use the matched IoU raised to ``gamma`` as a soft
+    classification target, while negative logits are weighted by their
+    predicted foreground probability.  This keeps the loss inference-free
+    and is intended for DETR-style one-to-one matching.
+    """
+
+    def __init__(self, gamma=1.5):
+        super().__init__()
+        self.gamma = float(gamma)
+
+    def forward(self, pred_score, gt_score, label):
+        """Compute DEIM MAL for logits, IoU quality scores, and one-hot labels."""
+        with torch.cuda.amp.autocast(enabled=False):
+            logits = pred_score.float()
+            labels = label.float()
+            # DEIM treats the negative modulation as a detached weight; gradients
+            # flow through BCE logits, not through the weighting term itself.
+            probabilities = logits.sigmoid().detach()
+            soft_targets = gt_score.float().clamp_(0, 1).pow(self.gamma) * labels
+            weights = labels + (1.0 - labels) * probabilities.pow(self.gamma)
+            loss = F.binary_cross_entropy_with_logits(logits, soft_targets, reduction='none') * weights
+        return loss.mean(1).sum()
+
+
 class FocalLoss(nn.Module):
     """Wraps focal loss around existing loss_fcn(), i.e. criteria = FocalLoss(nn.BCEWithLogitsLoss(), gamma=1.5)."""
 

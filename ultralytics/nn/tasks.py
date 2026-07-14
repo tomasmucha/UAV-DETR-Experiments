@@ -446,7 +446,10 @@ class RTDETRDetectionModel(DetectionModel):
         from ultralytics.models.utils.loss import RTDETRDetectionLoss, RTDETRFDRDetectionLoss
 
         criterion_cls = RTDETRFDRDetectionLoss if isinstance(self.model[-1], RTDETRFDRDecoder) else RTDETRDetectionLoss
-        return criterion_cls(nc=self.model[-1].nc, use_vfl=True, use_sl=False, use_emasl=False, use_svfl=False, use_emasvfl=False)
+        use_mal = bool(self.yaml.get('use_mal', False))
+        return criterion_cls(nc=self.model[-1].nc, use_vfl=not use_mal, use_mal=use_mal,
+                             mal_gamma=float(self.yaml.get('mal_gamma', 1.5)), use_sl=False,
+                             use_emasl=False, use_svfl=False, use_emasvfl=False)
 
     def loss(self, batch, preds=None):
         """
