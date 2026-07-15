@@ -19,8 +19,9 @@ from torch.nn.init import constant_
 from ..modules.head import RTDETRDecoder
 from ..modules.transformer import DeformableTransformerDecoderLayer, MLP
 from ..modules.utils import inverse_sigmoid
+from .qsd import QuerySemanticDictionary, normalized_distribution_entropy
 
-__all__ = ['RTDETRFDRDecoder']
+__all__ = ['RTDETRFDRDecoder', 'RTDETRFDRQSDDecoder']
 
 
 def _weighting_function(reg_max=32, up=0.5, reg_scale=4.0):
@@ -63,7 +64,8 @@ class FDRIntegral(nn.Module):
 class FineGrainedDeformableTransformerDecoder(nn.Module):
     """RT-DETR decoder with D-FINE-style residual distribution refinement."""
 
-    def __init__(self, hidden_dim, decoder_layer, num_layers, integral, reg_scale=4.0, eval_idx=-1):
+    def __init__(self, hidden_dim, decoder_layer, num_layers, integral, reg_scale=4.0, eval_idx=-1,
+                 query_dictionary=None):
         super().__init__()
         self.layers = nn.ModuleList([copy.deepcopy(decoder_layer) for _ in range(num_layers)])
         self.num_layers = num_layers
@@ -71,6 +73,7 @@ class FineGrainedDeformableTransformerDecoder(nn.Module):
         self.eval_idx = eval_idx if eval_idx >= 0 else num_layers + eval_idx
         self.integral = integral
         self.reg_scale = reg_scale
+        self.query_dictionary = query_dictionary
 
     def forward(self, embed, refer_bbox, feats, shapes, bbox_head, score_head, pos_mlp, pre_bbox_head,
                 attn_mask=None, padding_mask=None):
@@ -91,6 +94,11 @@ class FineGrainedDeformableTransformerDecoder(nn.Module):
             corners = bbox_head[i](output)
             corners = corners if accumulated_corners is None else corners + accumulated_corners
             refined_bbox = _distance2bbox(initial_bbox, self.integral(corners), self.reg_scale)
+            if self.query_dictionary is not None:
+                uncertainty = normalized_distribution_entropy(corners, self.integral.reg_max + 1)
+                output = self.query_dictionary(output, uncertainty)
+                if i == 0:
+                    pre_scores = score_head[0](output)
 
             if self.training or i == self.eval_idx:
                 dec_cls.append(score_head[i](output))
@@ -151,3 +159,34 @@ class RTDETRFDRDecoder(RTDETRDecoder):
             return outputs
         y = torch.cat((dec_bboxes.squeeze(0), dec_scores.squeeze(0).sigmoid()), -1)
         return y if self.export else (y, outputs)
+
+
+class RTDETRFDRQSDDecoder(RTDETRFDRDecoder):
+    """FDR localization with uncertainty-guided query semantic retrieval."""
+
+    def __init__(self, nc=80, ch=(512, 1024, 2048), hd=256, nq=300, ndp=4, nh=8, ndl=6,
+                 d_ffn=1024, eval_idx=-1, dropout=0., act=nn.ReLU(), nd=100,
+                 label_noise_ratio=0.5, box_noise_scale=1.0, learnt_init_query=False,
+                 reg_max=32, reg_scale=4.0, up=0.5, qsd_num_prototypes=64,
+                 qsd_temperature=0.07, qsd_initial_scale=0.10, qsd_max_scale=0.50,
+                 qsd_uncertainty_gain=1.0):
+        super().__init__(nc, ch, hd, nq, ndp, nh, ndl, d_ffn, eval_idx, dropout, act, nd,
+                         label_noise_ratio, box_noise_scale, learnt_init_query, reg_max, reg_scale, up)
+        dictionary = QuerySemanticDictionary(
+            hd,
+            qsd_num_prototypes,
+            qsd_temperature,
+            qsd_initial_scale,
+            qsd_max_scale,
+            qsd_uncertainty_gain,
+        )
+        decoder_layer = DeformableTransformerDecoderLayer(hd, nh, d_ffn, dropout, act, self.nl, ndp)
+        self.decoder = FineGrainedDeformableTransformerDecoder(
+            hd,
+            decoder_layer,
+            ndl,
+            self.fdr_integral,
+            reg_scale,
+            eval_idx,
+            query_dictionary=dictionary,
+        )

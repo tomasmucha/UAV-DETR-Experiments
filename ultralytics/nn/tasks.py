@@ -886,7 +886,7 @@ def parse_model(d, ch, verbose=True, warehouse_manager=None):  # model_dict, inp
             args.append([ch[x] for x in f])
             if m is Segment:
                 args[2] = make_divisible(min(args[2], max_channels) * width, 8)
-        elif m in {RTDETRDecoder, RTDETRFDRDecoder}:  # special case, channels arg must be passed in index 1
+        elif m in {RTDETRDecoder, RTDETRFDRDecoder, RTDETRQSDDecoder, RTDETRFDRQSDDecoder}:  # decoder channels
             args.insert(1, [ch[x] for x in f])
         elif isinstance(m, str):
             t = m
