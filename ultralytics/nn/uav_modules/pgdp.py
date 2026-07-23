@@ -17,7 +17,11 @@ import torch.nn.functional as F
 
 from ..modules.conv import CBAM
 
-__all__ = ["PGDPEnhance"]
+__all__ = [
+    "PGDPEnhance",
+    "PFIMEnhance",
+    "PFIMPGDPEnhance",
+]
 
 
 def _conv_block(c1: int, c2: int, repeats: int = 2) -> nn.Sequential:
@@ -31,6 +35,110 @@ def _conv_block(c1: int, c2: int, repeats: int = 2) -> nn.Sequential:
             ]
         )
     return nn.Sequential(*layers)
+
+
+class _GDN(nn.Module):
+    """Generalized divisive normalization used by the PFIM density estimator."""
+
+    def __init__(self, channels: int, beta_min: float = 1e-6):
+        super().__init__()
+        self.beta_min = float(beta_min)
+        self.beta = nn.Parameter(torch.full((channels,), math.log(math.expm1(1.0 - beta_min))))
+        gamma = torch.full(
+            (channels, channels, 1, 1),
+            math.log(math.expm1(beta_min)),
+        )
+        diagonal = torch.arange(channels)
+        gamma[diagonal, diagonal, 0, 0] = math.log(math.expm1(0.1))
+        self.gamma = nn.Parameter(gamma)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        beta = F.softplus(self.beta) + self.beta_min
+        gamma = F.softplus(self.gamma)
+        normalization = F.conv2d(x.square(), gamma, beta)
+        return x * torch.rsqrt(normalization.clamp_min(self.beta_min))
+
+
+class _PixelFeatureInformationModeling(nn.Module):
+    """Estimate the PFIM Gaussian scale map and information-entropy loss."""
+
+    def __init__(self, channels: int):
+        super().__init__()
+        self.parameter_features = nn.Sequential(
+            nn.Conv2d(channels, channels, 3, padding=1, bias=False),
+            _GDN(channels),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(channels, channels, 3, padding=1, bias=False),
+            _GDN(channels),
+            nn.ReLU(inplace=True),
+        )
+        self.parameter_head = nn.Sequential(
+            nn.Conv2d(channels, channels, 3, padding=1),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(channels, 2 * channels, 3, padding=1),
+        )
+
+    def forward(self, feature: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        mean, raw_scale = self.parameter_head(self.parameter_features(feature)).chunk(2, dim=1)
+        scale = F.softplus(raw_scale).clamp_min(1e-4)
+        information_map = scale.mean(dim=1, keepdim=True)
+
+        if not self.training:
+            return information_map, feature.new_zeros(())
+
+        quantized = feature + torch.empty_like(feature).uniform_(-0.5, 0.5)
+        inv_sqrt_two = 1.0 / math.sqrt(2.0)
+        upper = (quantized + 0.5 - mean) / scale
+        lower = (quantized - 0.5 - mean) / scale
+        likelihood = 0.5 * (
+            torch.erf(upper * inv_sqrt_two) - torch.erf(lower * inv_sqrt_two)
+        )
+        entropy_loss = -torch.log2(likelihood.clamp_min(1e-9)).mean()
+        return information_map, entropy_loss
+
+
+class PFIMEnhance(nn.Module):
+    """PFIM-only P2 enhancement with the same bounded residual used by PGDP."""
+
+    def __init__(
+        self,
+        channels: int,
+        entropy_gain: float = 0.01,
+        gamma: float = 0.1,
+        gamma_max: float = 1.0,
+    ):
+        super().__init__()
+        if not 0.0 < gamma < gamma_max:
+            raise ValueError(f"Expected 0 < gamma < gamma_max, got {gamma=} and {gamma_max=}")
+
+        self.pfim = _PixelFeatureInformationModeling(channels)
+        self.cbam = CBAM(channels)
+        ratio = gamma / gamma_max
+        self.raw_gamma = nn.Parameter(torch.tensor(math.log(ratio / (1.0 - ratio))))
+        self.register_buffer("gamma_max", torch.tensor(float(gamma_max)))
+        self.entropy_gain = float(entropy_gain)
+        self._aux_loss = None
+
+    @property
+    def effective_gamma(self):
+        return self.gamma_max * torch.sigmoid(self.raw_gamma)
+
+    def set_targets(self, targets: dict, image_size) -> None:
+        """Reset the per-batch entropy loss; PFIM itself is label-free."""
+        self._aux_loss = None
+
+    def consume_aux_loss(self):
+        loss = self._aux_loss
+        self._aux_loss = None
+        return loss
+
+    def forward(self, p2: torch.Tensor) -> torch.Tensor:
+        information_map, entropy_loss = self.pfim(p2)
+        attended = self.cbam(p2 * (1.0 + information_map))
+        output = p2 + self.effective_gamma * (attended - p2)
+        if self.training:
+            self._aux_loss = self.entropy_gain * entropy_loss
+        return output
 
 
 class PGDPEnhance(nn.Module):
@@ -181,5 +289,101 @@ class PGDPEnhance(nn.Module):
             self._aux_loss = self.pred_gain * sum(
                 self._weighted_mse(pred, target, threshold) for pred in (pred2, pred3, pred4)
             )
+
+        return output
+
+
+class PFIMPGDPEnhance(PGDPEnhance):
+    """Controlled PFIM-to-PGDP feature enhancement for UAV-DETR.
+
+    PFIM estimates the information map ``sigma`` from raw P2. The map guides
+    all three PGDP prediction levels. The original PGDP bounded-residual term
+    is preserved exactly and PFIM contributes an independently gated residual.
+    """
+
+    def __init__(
+        self,
+        channels,
+        hidden: int = 64,
+        pred_gain: float = 1.0,
+        entropy_gain: float = 0.01,
+        gamma: float = 0.1,
+        gamma_max: float = 1.0,
+        information_gamma: float = 0.1,
+    ):
+        super().__init__(
+            channels,
+            hidden=hidden,
+            pred_gain=pred_gain,
+            gamma=gamma,
+            gamma_max=gamma_max,
+        )
+        if not 0.0 < information_gamma < gamma_max:
+            raise ValueError(
+                "Expected 0 < information_gamma < gamma_max, "
+                f"got {information_gamma=} and {gamma_max=}"
+            )
+
+        self.pfim = _PixelFeatureInformationModeling(channels[0])
+        self.information_cbam = CBAM(channels[0])
+        ratio = information_gamma / gamma_max
+        self.information_raw_gamma = nn.Parameter(
+            torch.tensor(math.log(ratio / (1.0 - ratio)))
+        )
+        self.entropy_gain = float(entropy_gain)
+
+    @property
+    def effective_information_gamma(self):
+        return self.gamma_max * torch.sigmoid(self.information_raw_gamma)
+
+    @staticmethod
+    def _resize_information_map(information_map: torch.Tensor, feature: torch.Tensor) -> torch.Tensor:
+        return F.interpolate(information_map, feature.shape[-2:], mode="bilinear", align_corners=False)
+
+    def forward(self, features):
+        p2, p3, p4 = features
+        information_map, entropy_loss = self.pfim(p2)
+
+        f4 = self.conv4(self.p4_proj(p4) + self._resize_information_map(information_map, p4))
+        logits4 = self.map4(f4)
+        f3 = self.conv3(
+            self.p3_proj(p3)
+            + self.up4(f4)
+            + F.interpolate(logits4, p3.shape[-2:])
+            + self._resize_information_map(information_map, p3)
+        )
+        logits3 = self.map3(f3)
+        f2 = self.conv2(
+            self.p2_proj(p2)
+            + self.up3(f3)
+            + F.interpolate(logits3, p2.shape[-2:])
+            + information_map
+        )
+        logits2 = self.map2(f2)
+
+        map2 = torch.sigmoid(logits2)
+        information_feature = self.information_cbam(p2 * (1.0 + information_map))
+        position_feature = self.cbam(p2 * (1.0 + map2))
+        output = (
+            p2
+            + self.effective_gamma * (position_feature - p2)
+            + self.effective_information_gamma * (information_feature - p2)
+        )
+
+        if self.training:
+            auxiliary_loss = self.entropy_gain * entropy_loss
+            if self._targets is not None:
+                target, threshold = self._build_gaussian_target(p2)
+                pred2 = map2
+                pred3 = torch.sigmoid(
+                    F.interpolate(logits3, p2.shape[-2:], mode="bilinear", align_corners=False)
+                )
+                pred4 = torch.sigmoid(
+                    F.interpolate(logits4, p2.shape[-2:], mode="bilinear", align_corners=False)
+                )
+                auxiliary_loss = auxiliary_loss + self.pred_gain * sum(
+                    self._weighted_mse(pred, target, threshold) for pred in (pred2, pred3, pred4)
+                )
+            self._aux_loss = auxiliary_loss
 
         return output
