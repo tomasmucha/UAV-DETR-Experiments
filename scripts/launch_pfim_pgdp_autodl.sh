@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ROOT=/root/autodl-tmp/UAV-DETR-Experiments
+ROOT="${ROOT:-/root/autodl-tmp/UAV-DETR-Experiments}"
 EXPECTED_COMMIT="${EXPECTED_COMMIT:?Set EXPECTED_COMMIT to the pushed experiment commit}"
 RUN=uavdetr_r18_pfim_pgdp_visdrone640
 MODEL=ultralytics/cfg/models/uavdetr-r18-pfim-pgdp.yaml
