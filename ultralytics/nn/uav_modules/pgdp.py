@@ -118,6 +118,7 @@ class PFIMEnhance(nn.Module):
         self.register_buffer("gamma_max", torch.tensor(float(gamma_max)))
         self.entropy_gain = float(entropy_gain)
         self._aux_loss = None
+        self._aux_enabled = False
 
     @property
     def effective_gamma(self):
@@ -126,17 +127,19 @@ class PFIMEnhance(nn.Module):
     def set_targets(self, targets: dict, image_size) -> None:
         """Reset the per-batch entropy loss; PFIM itself is label-free."""
         self._aux_loss = None
+        self._aux_enabled = True
 
     def consume_aux_loss(self):
         loss = self._aux_loss
         self._aux_loss = None
+        self._aux_enabled = False
         return loss
 
     def forward(self, p2: torch.Tensor) -> torch.Tensor:
         information_map, entropy_loss = self.pfim(p2)
         attended = self.cbam(p2 * (1.0 + information_map))
         output = p2 + self.effective_gamma * (attended - p2)
-        if self.training:
+        if self.training and self._aux_enabled:
             self._aux_loss = self.entropy_gain * entropy_loss
         return output
 
@@ -370,20 +373,18 @@ class PFIMPGDPEnhance(PGDPEnhance):
             + self.effective_information_gamma * (information_feature - p2)
         )
 
-        if self.training:
-            auxiliary_loss = self.entropy_gain * entropy_loss
-            if self._targets is not None:
-                target, threshold = self._build_gaussian_target(p2)
-                pred2 = map2
-                pred3 = torch.sigmoid(
-                    F.interpolate(logits3, p2.shape[-2:], mode="bilinear", align_corners=False)
-                )
-                pred4 = torch.sigmoid(
-                    F.interpolate(logits4, p2.shape[-2:], mode="bilinear", align_corners=False)
-                )
-                auxiliary_loss = auxiliary_loss + self.pred_gain * sum(
-                    self._weighted_mse(pred, target, threshold) for pred in (pred2, pred3, pred4)
-                )
+        if self.training and self._targets is not None:
+            target, threshold = self._build_gaussian_target(p2)
+            pred2 = map2
+            pred3 = torch.sigmoid(
+                F.interpolate(logits3, p2.shape[-2:], mode="bilinear", align_corners=False)
+            )
+            pred4 = torch.sigmoid(
+                F.interpolate(logits4, p2.shape[-2:], mode="bilinear", align_corners=False)
+            )
+            auxiliary_loss = self.entropy_gain * entropy_loss + self.pred_gain * sum(
+                self._weighted_mse(pred, target, threshold) for pred in (pred2, pred3, pred4)
+            )
             self._aux_loss = auxiliary_loss
 
         return output
