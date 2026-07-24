@@ -856,6 +856,15 @@ def parse_model(d, ch, verbose=True, warehouse_manager=None):  # model_dict, inp
             c1 = [ch[x] for x in f]
             c2 = c1[0]
             args = [c1, *args]
+        elif m is FSEM:
+            c1 = [ch[x] for x in f]
+            c2 = c1[0]  # Placeholder; FSEMSelect declares each tuple level explicitly.
+            args = [c1, *args]
+        elif m is FSEMSelect:
+            if not isinstance(f, int):
+                raise ValueError(f"FSEMSelect expects one FSEM source index, got {f}")
+            c2 = make_divisible(min(args[1], max_channels) * width, 8)
+            args = [args[0], c2]
         elif m in {HGStem, HGBlock}:
             c1, cm, c2 = ch[f], args[0], args[1]
             args = [c1, cm, c2, *args[2:]]
